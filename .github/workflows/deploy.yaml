@@ -1,0 +1,44 @@
+name: Deploy App
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: Name of the app to deploy, like esapi or queue
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    name: Deploy via webhook
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-${{ inputs.env }}
+    steps:
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag image as production
+        run: |
+          docker pull ghcr.io/${{ github.repository }}:${{ github.sha }}
+          docker tag ghcr.io/${{ github.repository }}:${{ github.sha }} ghcr.io/${{ github.repository }}:production
+          docker push ghcr.io/${{ github.repository }}:production
+
+      - name: Trigger deployment webhook
+        run: |
+          set -euo pipefail
+          curl -Ssf --user "token:${{ secrets.DEPLOY_TOKEN }}" https://webhook.es01.simpleanalytics.com:444/deploy?app=${{ inputs.app }} &
+          curl -Ssf --user "token:${{ secrets.DEPLOY_TOKEN }}" https://webhook.es02.simpleanalytics.com:444/deploy?app=${{ inputs.app }} &
+          curl -Ssf --user "token:${{ secrets.DEPLOY_TOKEN }}" https://webhook.es03.simpleanalytics.com:444/deploy?app=${{ inputs.app }} &
+          curl -Ssf --user "token:${{ secrets.DEPLOY_TOKEN }}" https://webhook.es04.simpleanalytics.com:444/deploy?app=${{ inputs.app }} &
+          for pid in $(jobs -p); do
+            wait "$pid"
+          done
