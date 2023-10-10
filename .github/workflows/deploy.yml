@@ -7,6 +7,10 @@ on:
         description: Name of the app to deploy, like esapi or queue
         required: true
         type: string
+      image_repo:
+        description: Image repo, like ghcr.io/simpleanalytics/elasticsearch
+        required: true
+        type: string
 
 jobs:
   deploy:
@@ -29,9 +33,9 @@ jobs:
 
       - name: Tag image as production
         run: |
-          docker pull ghcr.io/${{ github.repository }}:${{ github.sha }}
-          docker tag ghcr.io/${{ github.repository }}:${{ github.sha }} ghcr.io/${{ github.repository }}:production
-          docker push ghcr.io/${{ github.repository }}:production
+          docker pull ${{ inputs.image_repo }}:${{ github.sha }}
+          docker tag ${{ inputs.image_repo }}:${{ github.sha }} ${{ inputs.image_repo }}:production
+          docker push ${{ inputs.image_repo }}:production
 
       - name: Trigger deployment webhook
         run: |
