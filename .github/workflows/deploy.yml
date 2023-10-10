@@ -43,6 +43,7 @@ jobs:
           curl -Ssf --user "token:${{ secrets.DEPLOY_TOKEN }}" https://webhook.es01.simpleanalytics.com:444/deploy?app=${{ inputs.app }} &
           curl -Ssf --user "token:${{ secrets.DEPLOY_TOKEN }}" https://webhook.es02.simpleanalytics.com:444/deploy?app=${{ inputs.app }} &
           curl -Ssf --user "token:${{ secrets.DEPLOY_TOKEN }}" https://webhook.es03.simpleanalytics.com:444/deploy?app=${{ inputs.app }} &
+          curl -Ssf --user "token:${{ secrets.DEPLOY_TOKEN }}" https://webhook.es04.simpleanalytics.com:444/deploy?app=${{ inputs.app }} &
           for pid in $(jobs -p); do
             wait "$pid"
           done
