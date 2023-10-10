@@ -12,6 +12,7 @@ jobs:
   deploy:
     name: Deploy via webhook
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     concurrency:
       group: deploy-${{ inputs.env }}
     steps:
