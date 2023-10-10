@@ -9,7 +9,7 @@ Example usage:
     name: Deploy
     needs: [build, test]
     if: github.event_name != 'pull_request'
-    uses: simpleanalytics/github-actions/.github/workflows/deploy.yaml@main
+    uses: simpleanalytics/github-actions/.github/workflows/deploy.yml@main
     secrets: inherit
     timeout-minutes: 10
     with:
