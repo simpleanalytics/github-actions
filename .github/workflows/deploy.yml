@@ -41,7 +41,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          hosts=( "es01" "es02" "es03" "es04" "es05" )
+          hosts=( "es03" "es04" "es05" )
           for host in "${hosts[@]}"; do
             curl -Ssf --user "token:${{ secrets.DEPLOY_TOKEN }}" https://webhook.$host.simpleanalytics.com:444/deploy?app=${{ inputs.app }} &
           done
