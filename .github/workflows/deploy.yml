@@ -37,7 +37,7 @@ jobs:
           docker tag ${{ inputs.image_repo }}:${{ github.sha }} ${{ inputs.image_repo }}:production
           docker push ${{ inputs.image_repo }}:production
 
-      - name: Trigger deployment webhook
+      - name: Trigger deployment webhook with output
         run: |
           set -euo pipefail
 
