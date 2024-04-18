@@ -58,11 +58,13 @@ jobs:
 
           # Read status codes and responses after all jobs have completed
           for host in "${hosts[@]}"; do
+            echo "::group::Webhook output for $host"
             echo "Host $host:"
             echo "HTTP Status Code: $(cat status_$host.txt)"
             echo "Response Body:"
             cat response_$host.tmp
             echo "" # for better readability
+            echo "::endgroup::"
           done
 
           if [ "$fail_flag" -ne 0 ]; then
