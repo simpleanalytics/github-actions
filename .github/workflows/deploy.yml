@@ -39,7 +39,7 @@ jobs:
 
       - name: Trigger deployment webhook with output
         run: |
-          set -euo pipefail
+          set -uo pipefail # no "e" because we want to retrieve the curl output
 
           hosts=( "es04" "es06" "es07" )
           for host in "${hosts[@]}"; do
