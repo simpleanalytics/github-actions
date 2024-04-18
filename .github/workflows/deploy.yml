@@ -42,6 +42,8 @@ jobs:
           set -uo pipefail # no "e" because we want to retrieve the curl output
 
           hosts=( "es04" "es06" "es07" )
+          fail_flag=0 # Flag to track if any command fails
+
           for host in "${hosts[@]}"; do
             curl -sSf --user "token:${{ secrets.DEPLOY_TOKEN }}" \
               --write-out "%{http_code}" --output response_$host.tmp \
@@ -49,7 +51,9 @@ jobs:
           done
 
           for pid in $(jobs -p); do
-            wait "$pid"
+            if ! wait "$pid"; then
+              fail_flag=1 # Set fail flag if a process fails
+            fi
           done
 
           # Read status codes and responses after all jobs have completed
@@ -60,3 +64,7 @@ jobs:
             cat response_$host.tmp
             echo "" # for better readability
           done
+
+          if [ "$fail_flag" -ne 0 ]; then
+            exit 1 # Exit with status 1 if any command failed
+          fi
