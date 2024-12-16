@@ -41,7 +41,7 @@ jobs:
         run: |
           set -uo pipefail # no "e" because we want to retrieve the curl output
 
-          hosts=( "es04" "es06" "es07" )
+          hosts=( "es08" "es09" )
           fail_flag=0 # Flag to track if any command fails
 
           for host in "${hosts[@]}"; do
