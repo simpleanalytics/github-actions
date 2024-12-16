@@ -45,7 +45,7 @@ jobs:
           fail_flag=0 # Flag to track if any command fails
 
           for host in "${hosts[@]}"; do
-            curl -sSf --user "token:${{ secrets.DEPLOY_TOKEN }}" \
+            curl -sS --fail-with-body --user "token:${{ secrets.DEPLOY_TOKEN }}" \
               --write-out "%{http_code}" --output response_$host.tmp \
               "https://webhook.$host.simpleanalytics.com:444/deploy?app=${{ inputs.app }}" > status_$host.txt 2>&1 &
           done
@@ -62,7 +62,7 @@ jobs:
             echo "Host $host:"
             echo "HTTP Status Code: $(cat status_$host.txt)"
             echo "Response Body:"
-            cat response_$host.tmp
+            cat response_$host.tmp || echo "No response body found"
             echo "" # for better readability
             echo "::endgroup::"
           done
