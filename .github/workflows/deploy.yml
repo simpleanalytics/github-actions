@@ -47,7 +47,7 @@ jobs:
           for host in "${hosts[@]}"; do
             curl -sS --fail-with-body --user "token:${{ secrets.DEPLOY_TOKEN }}" \
               --write-out "%{http_code}" --output response_$host.tmp \
-              "https://webhook.$host.simpleanalytics.com:444/deploy?app=${{ inputs.app }}" > status_$host.txt 2>&1 &
+              "https://webhook.$host.simpleanalytics.com/deploy?app=${{ inputs.app }}" > status_$host.txt 2>&1 &
           done
 
           for pid in $(jobs -p); do
