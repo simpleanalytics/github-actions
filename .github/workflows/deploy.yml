@@ -11,6 +11,11 @@ on:
         description: Image repo, like ghcr.io/simpleanalytics/elasticsearch
         required: true
         type: string
+      hosts:
+        description: Space-separated list of hosts to deploy to
+        required: false
+        default: "esapp01 esapp02 esapp03"
+        type: string
 
 jobs:
   deploy:
@@ -41,7 +46,7 @@ jobs:
         run: |
           set -uo pipefail # no "e" because we want to retrieve the curl output
 
-          hosts=( "esapp01" "esapp02" "esapp03" )
+          read -a hosts <<< "${{ inputs.hosts }}"
           fail_flag=0 # Flag to track if any command fails
 
           for host in "${hosts[@]}"; do
