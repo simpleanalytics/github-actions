@@ -11,6 +11,11 @@ on:
         description: Image repo, like ghcr.io/simpleanalytics/elasticsearch
         required: true
         type: string
+      image_tag:
+        description: Tag to deploy, defaults to github.sha
+        required: false
+        default: ""
+        type: string
       hosts:
         description: Space-separated list of hosts to deploy to
         required: false
@@ -37,9 +42,10 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Tag image as production
+        if: ${{ inputs.image_tag != 'production' }}
         run: |
-          docker pull ${{ inputs.image_repo }}:${{ github.sha }}
-          docker tag ${{ inputs.image_repo }}:${{ github.sha }} ${{ inputs.image_repo }}:production
+          docker pull ${{ inputs.image_repo }}:${{ inputs.image_tag || github.sha }}
+          docker tag ${{ inputs.image_repo }}:${{ inputs.image_tag || github.sha }} ${{ inputs.image_repo }}:production
           docker push ${{ inputs.image_repo }}:production
 
       - name: Trigger deployment webhook with output
