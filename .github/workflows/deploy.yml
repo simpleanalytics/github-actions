@@ -79,3 +79,15 @@ jobs:
           if [ "$fail_flag" -ne 0 ]; then
             exit 1 # Exit with status 1 if any command failed
           fi
+
+      - name: Add rollback instructions to summary
+        run: |
+          echo "### Rollback Instructions" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To roll back to this build at a later stage, run from the infra repo:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "./scripts <app yaml name> ${{ inputs.app }} ${{ inputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Where \`<app yaml name>\` is the file name without extension of your app in \`ansible/vars/apps/\`." >> $GITHUB_STEP_SUMMARY
