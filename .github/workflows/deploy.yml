@@ -14,7 +14,7 @@ on:
         type: string
         default: ""
       image_tag:
-        description: Tag to deploy, defaults to github.sha
+        description: Tag to deploy, like a git commit hash
         required: true
         type: string
       hosts:
