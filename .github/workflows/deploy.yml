@@ -84,7 +84,7 @@ jobs:
         run: |
           echo "### Rollback Instructions" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "To roll back to this build at a later stage, run from the infra repo:" >> $GITHUB_STEP_SUMMARY
+          echo "To roll back to this build at a later stage, retry the deploy run, or from infra repo:" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "./scripts <app yaml name> ${{ inputs.app }} ${{ inputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
