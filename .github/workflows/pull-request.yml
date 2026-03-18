@@ -12,7 +12,12 @@ on:
 jobs:
   trigger-bugbot:
     runs-on: ubuntu-latest
-    if: ${{ inputs.bugbot_enabled && !github.event.pull_request.draft }}
+    if: ${{ 
+      inputs.bugbot_enabled && 
+      !github.event.pull_request.draft && 
+      github.event_name == 'pull_request' && 
+      contains(fromJson('["opened", "reopened", "synchronize"]'), github.event.action) 
+    }}
     steps:
       - name: Validate PAT
         env:
