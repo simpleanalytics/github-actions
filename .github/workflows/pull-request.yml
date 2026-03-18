@@ -1,0 +1,27 @@
+name: Pull Request
+
+on:
+  workflow_call:
+    inputs:
+      bugbot_enabled:
+        description: 'Enable BugBot review'
+        type: boolean
+        required: false
+        default: true
+
+jobs:
+  trigger-bugbot:
+    runs-on: ubuntu-latest
+    if: ${{ inputs.bugbot_enabled }}
+    steps:
+      - name: Comment to trigger BugBot
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: 'bugbot run'
+            })
