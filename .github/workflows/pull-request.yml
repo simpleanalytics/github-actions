@@ -53,6 +53,11 @@ on:
           simpleanalytics/strapi
           simpleanalytics/support-reminder
           simpleanalytics/wordpress-plugin
+      context_clone_concurrency:
+        description: "Maximum number of context repositories to clone in parallel"
+        type: number
+        required: false
+        default: 8
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -152,12 +157,16 @@ jobs:
         id: checkout_context
         env:
           CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
+          CONTEXT_CLONE_CONCURRENCY: ${{ inputs.context_clone_concurrency }}
           CURRENT_REPOSITORY: ${{ github.repository }}
           READ_TOKEN: ${{ secrets.SA_PAT_ADRIAAN_READ_REPOS }}
         run: |
           context_dir="$RUNNER_TEMP/simpleanalytics-context"
           echo "context_dir=$context_dir" >> "$GITHUB_OUTPUT"
           mkdir -p "$context_dir"
+          status_dir="$RUNNER_TEMP/simpleanalytics-context-status"
+          rm -rf "$status_dir"
+          mkdir -p "$status_dir"
 
           if [[ -z "$READ_TOKEN" ]]; then
             message="SA_PAT_ADRIAAN_READ_REPOS is not set. Continuing with current-repo context only. Add this repo or org secret from 1Password by searching for SA_PAT_ADRIAAN_READ_REPOS."
@@ -170,7 +179,31 @@ jobs:
           fi
 
           export GH_TOKEN="$READ_TOKEN"
-          cloned=0
+          clone_concurrency="$CONTEXT_CLONE_CONCURRENCY"
+          if ! [[ "$clone_concurrency" =~ ^[0-9]+$ ]] || [[ "$clone_concurrency" -lt 1 ]]; then
+            clone_concurrency=8
+          fi
+
+          clone_repo() {
+            local repo="$1"
+            local safe_name="${repo//\//__}"
+            local owner="${repo%%/*}"
+            local name="${repo#*/}"
+            local target="$context_dir/$owner/$name"
+            local log_file="$status_dir/$safe_name.log"
+
+            mkdir -p "$(dirname "$target")"
+
+            if gh repo clone "$repo" "$target" -- --depth=1 --filter=blob:none >"$log_file" 2>&1; then
+              echo "$repo" > "$status_dir/$safe_name.ok"
+              printf 'Cloned %s\n' "$repo"
+            else
+              echo "$repo" > "$status_dir/$safe_name.fail"
+              cat "$log_file"
+              echo "::warning::Could not clone $repo for Claude context. Continuing without it."
+              rm -rf "$target"
+            fi
+          }
 
           while IFS= read -r raw_repo; do
             repo="${raw_repo%%#*}"
@@ -180,22 +213,25 @@ jobs:
               continue
             fi
 
-            owner="${repo%%/*}"
-            name="${repo#*/}"
-            target="$context_dir/$owner/$name"
-            mkdir -p "$(dirname "$target")"
+            clone_repo "$repo" &
 
-            if gh repo clone "$repo" "$target" -- --depth=1 --filter=blob:none; then
-              cloned=$((cloned + 1))
-            else
-              echo "::warning::Could not clone $repo for Claude context. Continuing without it."
-              rm -rf "$target"
-            fi
+            while [[ "$(jobs -rp | wc -l | xargs)" -ge "$clone_concurrency" ]]; do
+              wait -n || true
+            done
           done <<< "$CONTEXT_REPOSITORIES"
+
+          wait || true
+
+          cloned="$(find "$status_dir" -name '*.ok' -type f | wc -l | xargs)"
+          failed="$(find "$status_dir" -name '*.fail' -type f | wc -l | xargs)"
 
           {
             echo "### Cross-repo context"
-            echo "Cloned $cloned repositories into \`$context_dir\`."
+            echo "Cloned $cloned repositories into \`$context_dir\` with concurrency $clone_concurrency."
+            if [[ "$failed" != "0" ]]; then
+              echo ""
+              echo "$failed repositories could not be cloned. The review continued without them."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run Claude PR review
