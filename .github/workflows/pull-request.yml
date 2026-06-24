@@ -13,11 +13,6 @@ on:
         type: string
         required: false
         default: claude-opus-4-8
-      claude_max_turns:
-        description: "Maximum Claude Code turns for automated PR review"
-        type: number
-        required: false
-        default: 8
       claude_extra_prompt:
         description: "Optional repository-specific Claude review instructions"
         type: string
@@ -263,7 +258,6 @@ jobs:
             ${{ inputs.claude_extra_prompt }}
           claude_args: |
             --model ${{ inputs.claude_model }}
-            --max-turns ${{ inputs.claude_max_turns }}
             --allowedTools "Read,Edit,MultiEdit,Write,Grep,Glob,LS,mcp__github_inline_comment__create_inline_comment,Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git log:*),Bash(git show:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue edit:*),Bash(gh issue view:*),Bash(find:*),Bash(ls:*)"
 
       - name: Finalize SDLC label
