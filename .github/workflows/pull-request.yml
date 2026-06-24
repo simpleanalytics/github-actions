@@ -390,27 +390,34 @@ jobs:
               return expression.test(existingChecklist || '');
             }
 
-            async function createTrackingIssue(targetOwner, targetRepo) {
+            function buildIssueContent(problemSummary) {
+              const title = `Track: ${pullRequest.title}`;
+              const body = [
+                '## Problem',
+                '',
+                problemSummary || pullRequest.title,
+                '',
+                '## Pull request',
+                '',
+                `- Repository: ${nameWithOwner}`,
+                `- Pull request: ${pullRequest.html_url}`,
+                `- Author: @${pullRequest.user.login}`,
+                `- SDLC label: \`${needsReview}\``,
+                '',
+                '## Fix',
+                '',
+                'This pull request is expected to address the problem above. Review the linked PR for the exact implementation, validation, and approval discussion.',
+              ].join('\n');
+
+              return { title, body };
+            }
+
+            async function createTrackingIssue(targetOwner, targetRepo, issueContent) {
               const { data: issue } = await github.rest.issues.create({
                 owner: targetOwner,
                 repo: targetRepo,
-                title: `Review required: ${pullRequest.title}`,
-                body: [
-                  '## Pull request',
-                  '',
-                  `- Repository: ${nameWithOwner}`,
-                  `- Pull request: ${pullRequest.html_url}`,
-                  `- Author: @${pullRequest.user.login}`,
-                  `- SDLC label: \`${needsReview}\``,
-                  '',
-                  '## Reason',
-                  '',
-                  'This PR was classified as requiring review because it may affect security, data protection, system stability, customer/user data, or critical functionality.',
-                  '',
-                  '## Review',
-                  '',
-                  'Use the linked pull request as the source of truth for scope, validation, and approval.',
-                ].join('\n'),
+                title: issueContent.title,
+                body: issueContent.body,
               });
 
               return {
@@ -420,6 +427,12 @@ jobs:
             }
 
             const currentBody = pullRequest.body || '';
+            const existingSummary = extractSection(currentBody, 'Summary');
+            const existingSecurity = extractSection(currentBody, 'Security implications');
+            const existingTesting = extractSection(currentBody, 'Testing');
+            const existingChecklist = extractSection(currentBody, 'Checklist');
+            const summary = existingSummary || currentBody.trim() || pullRequest.title;
+            const issueContent = buildIssueContent(summary);
             const linkedIssues = uniqueRefs([
               ...(await closingIssueRefsFromGraphql()),
               ...closingIssueRefsFromBody(currentBody),
@@ -438,7 +451,7 @@ jobs:
               const failures = [];
               for (const target of targets) {
                 try {
-                  const createdIssue = await createTrackingIssue(target.owner, target.repo);
+                  const createdIssue = await createTrackingIssue(target.owner, target.repo, issueContent);
                   issueRef = createdIssue.ref;
                   core.info(`Created review tracking issue ${createdIssue.ref}: ${createdIssue.url}`);
                   break;
@@ -449,25 +462,47 @@ jobs:
               }
 
               if (!issueRef) {
-                core.setFailed(`Could not create a linked review tracking issue. Failures: ${failures.join('; ')}`);
-                return;
+                const suggestedIssue = `# ${issueContent.title}\n\n${issueContent.body}`;
+                const comment = [
+                  'Could not create a linked tracking issue automatically. Continuing without a linked issue.',
+                  '',
+                  `<details><summary>Suggested issue content</summary>`,
+                  '',
+                  '```markdown',
+                  suggestedIssue.replace(/```/g, "'''"),
+                  '```',
+                  '',
+                  '</details>',
+                  '',
+                  `Issue creation failures: ${failures.join('; ')}`,
+                ].join('\n');
+
+                try {
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: prNumber,
+                    body: comment,
+                  });
+                } catch (error) {
+                  core.warning(`Could not add suggested issue content as a PR comment: ${error.message}`);
+                }
+
+                core.warning(`Could not create a linked review tracking issue. Continuing without issue reference. Failures: ${failures.join('; ')}`);
               }
             }
 
-            const existingSummary = extractSection(currentBody, 'Summary');
-            const existingSecurity = extractSection(currentBody, 'Security implications');
-            const existingTesting = extractSection(currentBody, 'Testing');
-            const existingChecklist = extractSection(currentBody, 'Checklist');
-            const summary = existingSummary || currentBody.trim() || pullRequest.title;
             const security = existingSecurity || '- [ ] No security impact\n- [ ] Has security impact - described as:';
             const testing = existingTesting || 'Describe how this was tested.';
             const tested = checked(existingChecklist, 'Tested') ? 'x' : ' ';
             const askedForReview = checked(existingChecklist, 'Asked for a review') ? 'x' : ' ';
+            const closingLine = issueRef ? `Closes ${issueRef}` : 'No linked issue was created automatically.';
+            const linkedIssueCheck = issueRef ? 'x' : ' ';
 
             const nextBody = [
               '## Summary',
               '',
-              `Closes ${issueRef}`,
+              closingLine,
               '',
               summary,
               '',
@@ -481,7 +516,7 @@ jobs:
               '',
               '## Checklist',
               '',
-              '- [x] Linked to an issue',
+              `- [${linkedIssueCheck}] Linked to an issue`,
               `- [${tested}] Tested`,
               `- [${askedForReview}] Asked for a review`,
               '',
