@@ -8,11 +8,6 @@ on:
         type: string
         required: false
         default: claude-opus-4-8
-      claude_max_turns:
-        description: "Maximum Claude Code turns for manual @claude requests"
-        type: number
-        required: false
-        default: 10
       claude_trigger_phrase:
         description: "Phrase that triggers Claude in comments, reviews, issues, and issue titles"
         type: string
@@ -63,7 +58,6 @@ jobs:
             actions: read
           claude_args: |
             --model ${{ inputs.claude_model }}
-            --max-turns ${{ inputs.claude_max_turns }}
             --allowedTools "${{ inputs.claude_allowed_tools }}"
             --append-system-prompt "## General\n\nIf requirements are genuinely ambiguous and you cannot make a reasonable assumption, post all your questions in a single comment and stop. Do not ask about things you can decide yourself or infer from the codebase.\n\n## Pull request\n\nWhen creating or updating a pull request, use this PR template for the body:\n\n```\n## Summary\n\nCloses #<issue_number>\n\nDescribe the change.\n\n## Security implications\n\n- [ ] No security impact\n- [ ] Has security impact - described as:\n\n## Testing\n\nDescribe how this was tested.\n\n## Checklist\n\n- [ ] Linked to an issue\n- [ ] Tested\n- [ ] Asked for a review\n```\n\nFill in the template with the relevant details for the PR."
             ${{ inputs.claude_extra_args }}
