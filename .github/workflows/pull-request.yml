@@ -3,42 +3,522 @@ name: Pull Request
 on:
   workflow_call:
     inputs:
-      bugbot_enabled:
-        description: 'Enable BugBot review'
+      internal_app:
+        description: 'Set true for internal apps where low-risk changes do not require approval'
         type: boolean
         required: false
-        default: true
+        default: false
+      claude_model:
+        description: 'Claude model used for automated PR review'
+        type: string
+        required: false
+        default: claude-opus-4-8
+      claude_max_turns:
+        description: 'Maximum Claude Code turns for automated PR review'
+        type: number
+        required: false
+        default: 8
+      claude_extra_prompt:
+        description: 'Optional repository-specific Claude review instructions'
+        type: string
+        required: false
+        default: ''
+      context_repositories:
+        description: 'Newline-separated GitHub repositories to clone as read-only review context'
+        type: string
+        required: false
+        default: |
+          simpleanalytics/admin
+          simpleanalytics/assistant
+          simpleanalytics/astro-plugin
+          simpleanalytics/blog
+          simpleanalytics/boardroom
+          simpleanalytics/bunq-transactions
+          simpleanalytics/cal.com
+          simpleanalytics/calendar
+          simpleanalytics/certificates
+          simpleanalytics/chat
+          simpleanalytics/cloudflare-app
+          simpleanalytics/common
+          simpleanalytics/compare-node-versions-action
+          simpleanalytics/dashboard
+          simpleanalytics/dashboard-template
+          simpleanalytics/django-plugin
+          simpleanalytics/docs
+          simpleanalytics/dropzone
+          simpleanalytics/drupal-module
+          simpleanalytics/elasticsearch-api
+          simpleanalytics/elasticsearch-docker-image
+          simpleanalytics/embed
+          simpleanalytics/extension
+          simpleanalytics/fail-on-found-action
+          simpleanalytics/framer-plugin
+          simpleanalytics/github-actions
+          simpleanalytics/google-tag-manager
+          simpleanalytics/ide-config
+          simpleanalytics/infrastructure
+          simpleanalytics/intranet
+          simpleanalytics/iphone-app
+          simpleanalytics/loadtest
+          simpleanalytics/main
+          simpleanalytics/marketing-site
+          simpleanalytics/migrations
+          simpleanalytics/monitor
+          simpleanalytics/news-alerts
+          simpleanalytics/next
+          simpleanalytics/notify
+          simpleanalytics/online
+          simpleanalytics/playground.simpleanalytics.com
+          simpleanalytics/queue
+          simpleanalytics/recall
+          simpleanalytics/screenshot-grabber
+          simpleanalytics/scripts
+          simpleanalytics/shell-scripts
+          simpleanalytics/simplecapture.com
+          simpleanalytics/ssl-orchestrator
+          simpleanalytics/status
+          simpleanalytics/strapi
+          simpleanalytics/support-reminder
+          simpleanalytics/theprivacynewsletter.com
+          simpleanalytics/vue-plugin
+          simpleanalytics/wordpress-plugin
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      PERSONAL_ACCESS_TOKEN_ADRIAAN_READ_PACKAGES:
+        required: false
 
 jobs:
-  trigger-bugbot:
+  claude-review:
     runs-on: ubuntu-latest
-    if: ${{ inputs.bugbot_enabled && !github.event.pull_request.draft && github.event_name == 'pull_request' && contains(fromJson('["opened", "reopened", "synchronize"]'), github.event.action) }}
+    if: ${{ !github.event.pull_request.draft && github.event_name == 'pull_request' && contains(fromJson('["opened", "reopened", "synchronize"]'), github.event.action) }}
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      actions: read
+      id-token: write
+    env:
+      CONTEXT_DIR: ${{ runner.temp }}/simpleanalytics-context
     steps:
-      - name: Validate PAT
-        env:
-          PAT: ${{ secrets.PERSONAL_ACCESS_TOKEN_ADRIAAN_ISSUES }}
-        run: |
-          if [[ "$PAT" != github_pat_* ]]; then
-            echo "::error::PERSONAL_ACCESS_TOKEN_ADRIAAN_ISSUES is not set or is not a valid fine-grained PAT (must start with github_pat_)"
-            exit 1
-          fi
-
-      - name: Comment to trigger BugBot
+      - name: Ensure SDLC labels
         uses: actions/github-script@v8
         with:
-          github-token: ${{ secrets.PERSONAL_ACCESS_TOKEN_ADRIAAN_ISSUES }}
           script: |
-            const comment = await github.rest.issues.createComment({
+            const labels = [
+              {
+                name: 'change: needs review',
+                color: 'b60205',
+                description: 'Changes affecting security, data protection, or system stability.',
+              },
+              {
+                name: 'change: routine',
+                color: 'fbca04',
+                description: 'Changes to internal tools or low-risk changes (e.g., design updates or content modifications)',
+              },
+            ];
+
+            for (const label of labels) {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label.name,
+                });
+
+                await github.rest.issues.updateLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label.name,
+                  new_name: label.name,
+                  color: label.color,
+                  description: label.description,
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label.name,
+                  color: label.color,
+                  description: label.description,
+                });
+              }
+            }
+
+      - name: Checkout pull request branch
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Fetch base branch
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          git remote add base "https://github.com/${{ github.repository }}.git" 2>/dev/null || git remote set-url base "https://github.com/${{ github.repository }}.git"
+          git fetch --no-tags --prune --depth=200 base "$BASE_REF"
+
+      - name: Resolve review scope
+        id: review_scope
+        env:
+          EVENT_ACTION: ${{ github.event.action }}
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ "$EVENT_ACTION" == "synchronize" && -n "$BEFORE_SHA" && "$BEFORE_SHA" != "$HEAD_SHA" ]]; then
+            echo "mode=incremental" >> "$GITHUB_OUTPUT"
+            echo "diff_range=$BEFORE_SHA..$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            echo "scope_description=Only review commits added by this push: $BEFORE_SHA..$HEAD_SHA." >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=full-pr" >> "$GITHUB_OUTPUT"
+            echo "diff_range=$BASE_SHA...$HEAD_SHA" >> "$GITHUB_OUTPUT"
+            echo "scope_description=Review the full pull request diff: $BASE_SHA...$HEAD_SHA." >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout Simple Analytics context
+        env:
+          CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
+          CURRENT_REPOSITORY: ${{ github.repository }}
+          READ_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN_ADRIAAN_READ_PACKAGES }}
+        run: |
+          context_dir="$CONTEXT_DIR"
+          mkdir -p "$context_dir"
+
+          if [[ -z "$READ_TOKEN" ]]; then
+            message="PERSONAL_ACCESS_TOKEN_ADRIAAN_READ_PACKAGES is not set. Continuing with current-repo context only. Add this repo or org secret from 1Password by searching for PERSONAL_ACCESS_TOKEN_ADRIAAN_READ_PACKAGES."
+            echo "::warning::$message"
+            {
+              echo "### Cross-repo context"
+              echo "$message"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          export GH_TOKEN="$READ_TOKEN"
+          cloned=0
+
+          while IFS= read -r raw_repo; do
+            repo="${raw_repo%%#*}"
+            repo="$(printf '%s' "$repo" | xargs)"
+
+            if [[ -z "$repo" || "$repo" == "$CURRENT_REPOSITORY" ]]; then
+              continue
+            fi
+
+            owner="${repo%%/*}"
+            name="${repo#*/}"
+            target="$context_dir/$owner/$name"
+            mkdir -p "$(dirname "$target")"
+
+            if gh repo clone "$repo" "$target" -- --depth=1 --filter=blob:none; then
+              cloned=$((cloned + 1))
+            else
+              echo "::warning::Could not clone $repo for Claude context. Continuing without it."
+              rm -rf "$target"
+            fi
+          done <<< "$CONTEXT_REPOSITORIES"
+
+          {
+            echo "### Cross-repo context"
+            echo "Cloned $cloned repositories into \`$context_dir\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run Claude PR review
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          track_progress: false
+          use_sticky_comment: true
+          include_fix_links: true
+          additional_permissions: |
+            actions: read
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            PR URL: ${{ github.event.pull_request.html_url }}
+            INTERNAL APP: ${{ inputs.internal_app }}
+            REVIEW MODE: ${{ steps.review_scope.outputs.mode }}
+            REVIEW RANGE: ${{ steps.review_scope.outputs.diff_range }}
+            REVIEW SCOPE: ${{ steps.review_scope.outputs.scope_description }}
+            CROSS-REPO CONTEXT DIR: ${{ env.CONTEXT_DIR }}
+
+            Review this pull request for security vulnerabilities, privacy risks, correctness bugs, data loss, runtime/deployment failures, and high-confidence regressions.
+
+            Scope rules:
+            - For full-pr mode, review the full PR diff.
+            - For incremental mode, focus findings on the REVIEW RANGE only. Do not report issues that already existed earlier in the PR unless they are critical, exploitable, or made materially worse by the new commits.
+            - For SDLC label classification, consider the full pull request, not only the incremental range.
+            - Use local git commands such as `git diff ${{ steps.review_scope.outputs.diff_range }}` when helpful.
+            - You may inspect read-only cross-repo context under `${{ env.CONTEXT_DIR }}`. Do not edit files there.
+
+            SDLC label rules:
+            - Apply exactly one of these labels to PR #${{ github.event.pull_request.number }} using `gh issue edit`: `change: needs review` or `change: routine`.
+            - Use `change: needs review` when the PR affects customer data, user data, security, privacy, permissions, billing, infrastructure, production behavior, deployment safety, system stability, or critical system functionality.
+            - Use `change: routine` for internal tools or low-risk changes, such as design updates or content changes, that do not affect customer/user data, security, privacy, or critical functionality.
+            - If INTERNAL APP is true and the PR does not touch customer/user data, security, privacy, or critical functionality, use `change: routine`.
+            - If uncertain, use `change: needs review`.
+            - Remove the label you did not choose if it is present.
+
+            Noise control:
+            - Ignore style, naming, formatting, minor refactors, low-confidence concerns, and preference-only feedback.
+            - Summarize minor observations in at most two sentences, only if useful.
+            - Prefer no comment over a speculative comment.
+            - Report at most three findings unless there is a critical security or data-loss risk.
+
+            Fix behavior:
+            - If a fix is small, obvious, and low-risk, apply it directly to the PR branch and explain the change briefly.
+            - If a fix needs maintainer judgment, leave a concise finding with impact and the exact suggested fix.
+            - When possible, use Claude Code Action fix links or GitHub suggested changes so a maintainer can apply the fix later.
+
+            Output:
+            - If there are no actionable issues and you did not change files, leave one short comment saying the checked scope is OK and include the SDLC label you chose.
+            - If you changed files, keep the comment short and list the fix plus any validation you ran.
+            - If validation fails or you cannot safely validate, say that plainly without long reasoning.
+            - Do not create tracking issues or rewrite the PR body. The workflow handles that after labels are finalized.
+
+            Extra repository instructions:
+            ${{ inputs.claude_extra_prompt }}
+          claude_args: |
+            --model ${{ inputs.claude_model }}
+            --max-turns ${{ inputs.claude_max_turns }}
+            --allowedTools "Read,Edit,MultiEdit,Write,Grep,Glob,LS,mcp__github_inline_comment__create_inline_comment,Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git log:*),Bash(git show:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue edit:*),Bash(gh issue view:*),Bash(find:*),Bash(ls:*)"
+
+      - name: Finalize SDLC label
+        id: sdlc_label
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const needsReview = 'change: needs review';
+            const routine = 'change: routine';
+            const issueNumber = context.payload.pull_request.number;
+
+            const { data: issue } = await github.rest.issues.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body: '@cursor review'
-            })
+              issue_number: issueNumber,
+            });
 
-            await github.graphql(`
-              mutation MinimizeComment($id: ID!) {
-                minimizeComment(input: { subjectId: $id, classifier: OUTDATED }) {
-                  minimizedComment { isMinimized }
+            const labels = issue.labels.map((label) => typeof label === 'string' ? label : label.name);
+            const hasNeedsReview = labels.includes(needsReview);
+            const hasRoutine = labels.includes(routine);
+            let finalLabel;
+
+            if (hasNeedsReview && hasRoutine) {
+              await github.rest.issues.removeLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                name: routine,
+              }).catch((error) => {
+                if (error.status !== 404) throw error;
+              });
+              finalLabel = needsReview;
+              core.warning(`Both SDLC labels were present. Kept '${needsReview}' and removed '${routine}'.`);
+            } else if (hasNeedsReview) {
+              finalLabel = needsReview;
+            } else if (hasRoutine) {
+              finalLabel = routine;
+            } else {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                labels: [needsReview],
+              });
+              finalLabel = needsReview;
+              core.warning(`No SDLC label was present after Claude review. Added '${needsReview}'.`);
+            }
+
+            core.setOutput('label', finalLabel);
+            core.setOutput('requires_review', String(finalLabel === needsReview));
+
+      - name: Enforce review-required PR template
+        if: ${{ steps.sdlc_label.outputs.requires_review == 'true' }}
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const needsReview = 'change: needs review';
+            const pullRequest = context.payload.pull_request;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = pullRequest.number;
+            const nameWithOwner = `${owner}/${repo}`;
+
+            async function closingIssueRefsFromGraphql() {
+              try {
+                const result = await github.graphql(`
+                  query($owner: String!, $repo: String!, $number: Int!) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        closingIssuesReferences(first: 20) {
+                          nodes {
+                            number
+                            url
+                            repository {
+                              nameWithOwner
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                `, { owner, repo, number: prNumber });
+
+                return result.repository.pullRequest.closingIssuesReferences.nodes.map((issue) => ({
+                  ref: issue.repository.nameWithOwner === nameWithOwner ? `#${issue.number}` : `${issue.repository.nameWithOwner}#${issue.number}`,
+                  url: issue.url,
+                }));
+              } catch (error) {
+                core.warning(`Could not read closingIssuesReferences via GraphQL: ${error.message}`);
+                return [];
+              }
+            }
+
+            function closingIssueRefsFromBody(body) {
+              const refs = [];
+              const pattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+((?:[\w.-]+\/[\w.-]+)?#\d+)/gi;
+              let match;
+
+              while ((match = pattern.exec(body || '')) !== null) {
+                refs.push({ ref: match[1], url: '' });
+              }
+
+              return refs;
+            }
+
+            function uniqueRefs(refs) {
+              const seen = new Set();
+              return refs.filter((item) => {
+                if (!item.ref || seen.has(item.ref)) return false;
+                seen.add(item.ref);
+                return true;
+              });
+            }
+
+            function extractSection(body, title) {
+              const escapedTitle = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const expression = new RegExp(`(?:^|\\n)##\\s+${escapedTitle}\\s*\\n([\\s\\S]*?)(?=\\n##\\s+|$)`, 'i');
+              const match = expression.exec(body || '');
+              return match ? match[1].trim() : '';
+            }
+
+            function checked(existingChecklist, label) {
+              const expression = new RegExp(`-\\s*\\[[xX]\\]\\s*${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i');
+              return expression.test(existingChecklist || '');
+            }
+
+            async function createTrackingIssue(targetOwner, targetRepo) {
+              const { data: issue } = await github.rest.issues.create({
+                owner: targetOwner,
+                repo: targetRepo,
+                title: `Review required: ${pullRequest.title}`,
+                body: [
+                  '## Pull request',
+                  '',
+                  `- Repository: ${nameWithOwner}`,
+                  `- Pull request: ${pullRequest.html_url}`,
+                  `- Author: @${pullRequest.user.login}`,
+                  `- SDLC label: \`${needsReview}\``,
+                  '',
+                  '## Reason',
+                  '',
+                  'This PR was classified as requiring review because it may affect security, data protection, system stability, customer/user data, or critical functionality.',
+                  '',
+                  '## Review',
+                  '',
+                  'Use the linked pull request as the source of truth for scope, validation, and approval.',
+                ].join('\n'),
+              });
+
+              return {
+                ref: `${targetOwner}/${targetRepo}` === nameWithOwner ? `#${issue.number}` : `${targetOwner}/${targetRepo}#${issue.number}`,
+                url: issue.html_url,
+              };
+            }
+
+            const currentBody = pullRequest.body || '';
+            const linkedIssues = uniqueRefs([
+              ...(await closingIssueRefsFromGraphql()),
+              ...closingIssueRefsFromBody(currentBody),
+            ]);
+
+            let issueRef = linkedIssues[0]?.ref || '';
+
+            if (!issueRef) {
+              const targets = [
+                { owner: 'simpleanalytics', repo: 'dashboard' },
+                { owner, repo },
+              ].filter((target, index, targets) =>
+                targets.findIndex((item) => item.owner === target.owner && item.repo === target.repo) === index
+              );
+
+              const failures = [];
+              for (const target of targets) {
+                try {
+                  const createdIssue = await createTrackingIssue(target.owner, target.repo);
+                  issueRef = createdIssue.ref;
+                  core.info(`Created review tracking issue ${createdIssue.ref}: ${createdIssue.url}`);
+                  break;
+                } catch (error) {
+                  failures.push(`${target.owner}/${target.repo}: ${error.message}`);
+                  core.warning(`Could not create review tracking issue in ${target.owner}/${target.repo}: ${error.message}`);
                 }
               }
-            `, { id: comment.data.node_id })
+
+              if (!issueRef) {
+                core.setFailed(`Could not create a linked review tracking issue. Failures: ${failures.join('; ')}`);
+                return;
+              }
+            }
+
+            const existingSummary = extractSection(currentBody, 'Summary');
+            const existingSecurity = extractSection(currentBody, 'Security implications');
+            const existingTesting = extractSection(currentBody, 'Testing');
+            const existingChecklist = extractSection(currentBody, 'Checklist');
+            const summary = existingSummary || currentBody.trim() || pullRequest.title;
+            const security = existingSecurity || '- [ ] No security impact\n- [ ] Has security impact - described as:';
+            const testing = existingTesting || 'Describe how this was tested.';
+            const tested = checked(existingChecklist, 'Tested') ? 'x' : ' ';
+            const askedForReview = checked(existingChecklist, 'Asked for a review') ? 'x' : ' ';
+
+            const nextBody = [
+              '## Summary',
+              '',
+              `Closes ${issueRef}`,
+              '',
+              summary,
+              '',
+              '## Security implications',
+              '',
+              security,
+              '',
+              '## Testing',
+              '',
+              testing,
+              '',
+              '## Checklist',
+              '',
+              '- [x] Linked to an issue',
+              `- [${tested}] Tested`,
+              `- [${askedForReview}] Asked for a review`,
+              '',
+            ].join('\n');
+
+            if (nextBody.trim() !== currentBody.trim()) {
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: prNumber,
+                body: nextBody,
+              });
+              core.info(`Updated PR body with the Simple Analytics PR template and issue reference ${issueRef}.`);
+            } else {
+              core.info('PR body already matches the Simple Analytics PR template.');
+            }

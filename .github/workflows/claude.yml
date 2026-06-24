@@ -1,0 +1,97 @@
+name: Claude Code
+
+on:
+  workflow_call:
+    inputs:
+      claude_model:
+        description: 'Claude model used for manual @claude requests'
+        type: string
+        required: false
+        default: claude-opus-4-8
+      claude_max_turns:
+        description: 'Maximum Claude Code turns for manual @claude requests'
+        type: number
+        required: false
+        default: 10
+      claude_trigger_phrase:
+        description: 'Phrase that triggers Claude in comments, reviews, issues, and issue titles'
+        type: string
+        required: false
+        default: '@claude'
+      claude_allowed_tools:
+        description: 'Comma-separated Claude Code tools allowed during manual @claude requests'
+        type: string
+        required: false
+        default: Read,Edit,MultiEdit,Write,Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git log:*),Bash(git show:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)
+      claude_extra_args:
+        description: 'Additional raw Claude Code CLI arguments'
+        type: string
+        required: false
+        default: ''
+    outputs:
+      test_ref:
+        description: 'Pull request branch ref that a caller can pass to its local CI workflow'
+        value: ${{ jobs.resolve_test_ref.outputs.ref }}
+
+jobs:
+  claude:
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, inputs.claude_trigger_phrase)) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, inputs.claude_trigger_phrase)) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body || '', inputs.claude_trigger_phrase)) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body || '', inputs.claude_trigger_phrase) || contains(github.event.issue.title || '', inputs.claude_trigger_phrase)))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          trigger_phrase: ${{ inputs.claude_trigger_phrase }}
+          additional_permissions: |
+            actions: read
+          claude_args: |
+            --model ${{ inputs.claude_model }}
+            --max-turns ${{ inputs.claude_max_turns }}
+            --allowedTools "${{ inputs.claude_allowed_tools }}"
+            --append-system-prompt "## General\n\nIf requirements are genuinely ambiguous and you cannot make a reasonable assumption, post all your questions in a single comment and stop. Do not ask about things you can decide yourself or infer from the codebase.\n\n## Pull request\n\nWhen creating or updating a pull request, use this PR template for the body:\n\n```\n## Summary\n\nCloses #<issue_number>\n\nDescribe the change.\n\n## Security implications\n\n- [ ] No security impact\n- [ ] Has security impact - described as:\n\n## Testing\n\nDescribe how this was tested.\n\n## Checklist\n\n- [ ] Linked to an issue\n- [ ] Tested\n- [ ] Asked for a review\n```\n\nFill in the template with the relevant details for the PR."
+            ${{ inputs.claude_extra_args }}
+
+  resolve_test_ref:
+    needs: claude
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, inputs.claude_trigger_phrase)) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, inputs.claude_trigger_phrase)) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body || '', inputs.claude_trigger_phrase))
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+    steps:
+      - name: Resolve test ref
+        id: resolve
+        uses: actions/github-script@v8
+        with:
+          script: |
+            let ref = '';
+
+            if (context.eventName === 'issue_comment' && context.payload.issue?.pull_request?.url) {
+              const { data: pullRequest } = await github.request(context.payload.issue.pull_request.url);
+              ref = pullRequest.head.ref;
+            } else {
+              ref = context.payload.pull_request?.head?.ref || context.payload.repository?.default_branch || '';
+            }
+
+            core.setOutput('ref', ref);
