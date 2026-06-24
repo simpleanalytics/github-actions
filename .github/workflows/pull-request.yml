@@ -56,7 +56,7 @@ on:
     secrets:
       ANTHROPIC_API_KEY:
         required: true
-      PERSONAL_ACCESS_TOKEN_ADRIAAN_READ_PACKAGES:
+      SA_PAT_ADRIAAN_READ_REPOS:
         required: false
 
 jobs:
@@ -153,14 +153,14 @@ jobs:
         env:
           CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
           CURRENT_REPOSITORY: ${{ github.repository }}
-          READ_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN_ADRIAAN_READ_PACKAGES }}
+          READ_TOKEN: ${{ secrets.SA_PAT_ADRIAAN_READ_REPOS }}
         run: |
           context_dir="$RUNNER_TEMP/simpleanalytics-context"
           echo "context_dir=$context_dir" >> "$GITHUB_OUTPUT"
           mkdir -p "$context_dir"
 
           if [[ -z "$READ_TOKEN" ]]; then
-            message="PERSONAL_ACCESS_TOKEN_ADRIAAN_READ_PACKAGES is not set. Continuing with current-repo context only. Add this repo or org secret from 1Password by searching for PERSONAL_ACCESS_TOKEN_ADRIAAN_READ_PACKAGES."
+            message="SA_PAT_ADRIAAN_READ_REPOS is not set. Continuing with current-repo context only. Add this repo or org secret from 1Password by searching for SA_PAT_ADRIAAN_READ_REPOS."
             echo "::warning::$message"
             {
               echo "### Cross-repo context"

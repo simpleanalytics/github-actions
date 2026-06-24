@@ -30,7 +30,7 @@ For `change: needs review`, the workflow ensures the Simple Analytics PR templat
 
 Set `internal_app: true` for internal apps where low-risk changes that do not touch customer/user data, security, privacy, or critical functionality should stay `change: routine` and skip approval-oriented enforcement.
 
-The workflow defaults to `claude-opus-4-8`. It can clone read-only cross-repo context when the caller has a `PERSONAL_ACCESS_TOKEN_ADRIAAN_READ_PACKAGES` secret. If the secret is missing, the workflow continues with a warning; the token is stored in 1Password under that name.
+The workflow defaults to `claude-opus-4-8`. It can clone read-only cross-repo context when the caller has a `SA_PAT_ADRIAAN_READ_REPOS` secret. If the secret is missing, the workflow continues with a warning; the token is stored in 1Password under that name.
 
 ## Manual Claude requests
 
