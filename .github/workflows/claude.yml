@@ -4,33 +4,33 @@ on:
   workflow_call:
     inputs:
       claude_model:
-        description: 'Claude model used for manual @claude requests'
+        description: "Claude model used for manual @claude requests"
         type: string
         required: false
         default: claude-opus-4-8
       claude_max_turns:
-        description: 'Maximum Claude Code turns for manual @claude requests'
+        description: "Maximum Claude Code turns for manual @claude requests"
         type: number
         required: false
         default: 10
       claude_trigger_phrase:
-        description: 'Phrase that triggers Claude in comments, reviews, issues, and issue titles'
+        description: "Phrase that triggers Claude in comments, reviews, issues, and issue titles"
         type: string
         required: false
-        default: '@claude'
+        default: "@claude"
       claude_allowed_tools:
-        description: 'Comma-separated Claude Code tools allowed during manual @claude requests'
+        description: "Comma-separated Claude Code tools allowed during manual @claude requests"
         type: string
         required: false
         default: Read,Edit,MultiEdit,Write,Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git log:*),Bash(git show:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)
       claude_extra_args:
-        description: 'Additional raw Claude Code CLI arguments'
+        description: "Additional raw Claude Code CLI arguments"
         type: string
         required: false
-        default: ''
+        default: ""
     outputs:
       test_ref:
-        description: 'Pull request branch ref that a caller can pass to its local CI workflow'
+        description: "Pull request branch ref that a caller can pass to its local CI workflow"
         value: ${{ jobs.resolve_test_ref.outputs.ref }}
 
 jobs:
@@ -49,7 +49,7 @@ jobs:
       actions: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
@@ -82,7 +82,7 @@ jobs:
     steps:
       - name: Resolve test ref
         id: resolve
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             let ref = '';

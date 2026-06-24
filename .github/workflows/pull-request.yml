@@ -78,7 +78,7 @@ jobs:
       CONTEXT_DIR: ${{ runner.temp }}/simpleanalytics-context
     steps:
       - name: Ensure SDLC labels
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const labels = [
@@ -124,7 +124,7 @@ jobs:
             }
 
       - name: Checkout pull request branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
@@ -268,7 +268,7 @@ jobs:
 
       - name: Finalize SDLC label
         id: sdlc_label
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const needsReview = 'change: needs review';
@@ -317,7 +317,7 @@ jobs:
 
       - name: Enforce review-required PR template
         if: ${{ steps.sdlc_label.outputs.requires_review == 'true' }}
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const needsReview = 'change: needs review';
