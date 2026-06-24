@@ -74,8 +74,6 @@ jobs:
       issues: write
       actions: read
       id-token: write
-    env:
-      CONTEXT_DIR: ${{ runner.temp }}/simpleanalytics-context
     steps:
       - name: Ensure SDLC labels
         uses: actions/github-script@v9
@@ -156,12 +154,14 @@ jobs:
           fi
 
       - name: Checkout Simple Analytics context
+        id: checkout_context
         env:
           CONTEXT_REPOSITORIES: ${{ inputs.context_repositories }}
           CURRENT_REPOSITORY: ${{ github.repository }}
           READ_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN_ADRIAAN_READ_PACKAGES }}
         run: |
-          context_dir="$CONTEXT_DIR"
+          context_dir="$RUNNER_TEMP/simpleanalytics-context"
+          echo "context_dir=$context_dir" >> "$GITHUB_OUTPUT"
           mkdir -p "$context_dir"
 
           if [[ -z "$READ_TOKEN" ]]; then
@@ -223,7 +223,7 @@ jobs:
             REVIEW MODE: ${{ steps.review_scope.outputs.mode }}
             REVIEW RANGE: ${{ steps.review_scope.outputs.diff_range }}
             REVIEW SCOPE: ${{ steps.review_scope.outputs.scope_description }}
-            CROSS-REPO CONTEXT DIR: ${{ env.CONTEXT_DIR }}
+            CROSS-REPO CONTEXT DIR: ${{ steps.checkout_context.outputs.context_dir }}
 
             Review this pull request for security vulnerabilities, privacy risks, correctness bugs, data loss, runtime/deployment failures, and high-confidence regressions.
 
@@ -232,7 +232,7 @@ jobs:
             - For incremental mode, focus findings on the REVIEW RANGE only. Do not report issues that already existed earlier in the PR unless they are critical, exploitable, or made materially worse by the new commits.
             - For SDLC label classification, consider the full pull request, not only the incremental range.
             - Use local git commands such as `git diff ${{ steps.review_scope.outputs.diff_range }}` when helpful.
-            - You may inspect read-only cross-repo context under `${{ env.CONTEXT_DIR }}`. Do not edit files there.
+            - You may inspect read-only cross-repo context under `${{ steps.checkout_context.outputs.context_dir }}`. Do not edit files there.
 
             SDLC label rules:
             - Apply exactly one of these labels to PR #${{ github.event.pull_request.number }} using `gh issue edit`: `change: needs review` or `change: routine`.
