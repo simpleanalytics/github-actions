@@ -4,68 +4,49 @@ on:
   workflow_call:
     inputs:
       internal_app:
-        description: 'Set true for internal apps where low-risk changes do not require approval'
+        description: "Set true for internal apps where low-risk changes do not require approval"
         type: boolean
         required: false
         default: false
       claude_model:
-        description: 'Claude model used for automated PR review'
+        description: "Claude model used for automated PR review"
         type: string
         required: false
         default: claude-opus-4-8
       claude_max_turns:
-        description: 'Maximum Claude Code turns for automated PR review'
+        description: "Maximum Claude Code turns for automated PR review"
         type: number
         required: false
         default: 8
       claude_extra_prompt:
-        description: 'Optional repository-specific Claude review instructions'
+        description: "Optional repository-specific Claude review instructions"
         type: string
         required: false
-        default: ''
+        default: ""
       context_repositories:
-        description: 'Newline-separated GitHub repositories to clone as read-only review context'
+        description: "Newline-separated GitHub repositories to clone as read-only review context"
         type: string
         required: false
         default: |
           simpleanalytics/admin
           simpleanalytics/assistant
-          simpleanalytics/astro-plugin
-          simpleanalytics/blog
           simpleanalytics/boardroom
-          simpleanalytics/bunq-transactions
-          simpleanalytics/cal.com
-          simpleanalytics/calendar
-          simpleanalytics/certificates
           simpleanalytics/chat
-          simpleanalytics/cloudflare-app
           simpleanalytics/common
           simpleanalytics/compare-node-versions-action
           simpleanalytics/dashboard
-          simpleanalytics/dashboard-template
-          simpleanalytics/django-plugin
           simpleanalytics/docs
           simpleanalytics/dropzone
-          simpleanalytics/drupal-module
           simpleanalytics/elasticsearch-api
-          simpleanalytics/elasticsearch-docker-image
           simpleanalytics/embed
           simpleanalytics/extension
-          simpleanalytics/fail-on-found-action
-          simpleanalytics/framer-plugin
           simpleanalytics/github-actions
           simpleanalytics/google-tag-manager
-          simpleanalytics/ide-config
           simpleanalytics/infrastructure
           simpleanalytics/intranet
-          simpleanalytics/iphone-app
-          simpleanalytics/loadtest
           simpleanalytics/main
           simpleanalytics/marketing-site
-          simpleanalytics/migrations
-          simpleanalytics/monitor
           simpleanalytics/news-alerts
-          simpleanalytics/next
           simpleanalytics/notify
           simpleanalytics/online
           simpleanalytics/playground.simpleanalytics.com
@@ -73,14 +54,9 @@ on:
           simpleanalytics/recall
           simpleanalytics/screenshot-grabber
           simpleanalytics/scripts
-          simpleanalytics/shell-scripts
-          simpleanalytics/simplecapture.com
-          simpleanalytics/ssl-orchestrator
           simpleanalytics/status
           simpleanalytics/strapi
           simpleanalytics/support-reminder
-          simpleanalytics/theprivacynewsletter.com
-          simpleanalytics/vue-plugin
           simpleanalytics/wordpress-plugin
     secrets:
       ANTHROPIC_API_KEY:
