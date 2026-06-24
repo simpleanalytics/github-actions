@@ -178,7 +178,20 @@ jobs:
             exit 0
           fi
 
-          export GH_TOKEN="$READ_TOKEN"
+          export GIT_TERMINAL_PROMPT=0
+
+          askpass="$RUNNER_TEMP/simpleanalytics-git-askpass.sh"
+          cat > "$askpass" <<'EOF'
+          #!/usr/bin/env bash
+          case "$1" in
+            *Username*) echo "x-access-token" ;;
+            *Password*) echo "$READ_TOKEN" ;;
+            *) echo "" ;;
+          esac
+          EOF
+          chmod 700 "$askpass"
+          export GIT_ASKPASS="$askpass"
+
           clone_concurrency="$CONTEXT_CLONE_CONCURRENCY"
           if ! [[ "$clone_concurrency" =~ ^[0-9]+$ ]] || [[ "$clone_concurrency" -lt 1 ]]; then
             clone_concurrency=8
@@ -194,7 +207,7 @@ jobs:
 
             mkdir -p "$(dirname "$target")"
 
-            if gh repo clone "$repo" "$target" -- --depth=1 --filter=blob:none >"$log_file" 2>&1; then
+            if git clone --depth=1 --filter=blob:none "https://github.com/$repo.git" "$target" >"$log_file" 2>&1; then
               echo "$repo" > "$status_dir/$safe_name.ok"
               printf 'Cloned %s\n' "$repo"
             else
