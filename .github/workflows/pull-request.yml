@@ -256,10 +256,10 @@ jobs:
             fi
           fi
 
-          echo "mode=$mode" >> "$GITHUB_OUTPUT"
-          echo "diff_range=$diff_range" >> "$GITHUB_OUTPUT"
-          echo "full_pr_diff_range=$full_pr_range" >> "$GITHUB_OUTPUT"
           {
+            echo "mode=$mode"
+            echo "diff_range=$diff_range"
+            echo "full_pr_diff_range=$full_pr_range"
             echo "scope_description<<EOF"
             echo "$scope_description"
             echo "EOF"
@@ -322,13 +322,16 @@ jobs:
 
             mkdir -p "$(dirname "$target")"
 
-            if git clone --depth=1 --filter=blob:none "https://github.com/$repo.git" "$target" >"$log_file" 2>&1; then
+            if (
+              cd "$RUNNER_TEMP"
+              git -c "http.https://github.com/.extraheader=" -c credential.helper= clone --depth=1 --filter=blob:none "https://github.com/$repo.git" "$target"
+            ) >"$log_file" 2>&1; then
               echo "$repo" > "$status_dir/$safe_name.ok"
               printf 'Cloned %s\n' "$repo"
             else
               echo "$repo" > "$status_dir/$safe_name.fail"
               cat "$log_file"
-              echo "::warning::Could not clone $repo for Claude context. Continuing without it."
+              echo "::warning::Could not clone $repo for Claude context. Continuing without it. Confirm SA_PAT_ADRIAAN_READ_REPOS has metadata and contents read access to this repository."
               rm -rf "$target"
             fi
           }
