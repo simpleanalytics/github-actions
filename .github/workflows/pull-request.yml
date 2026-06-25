@@ -18,6 +18,11 @@ on:
         type: string
         required: false
         default: ""
+      claude_allowed_bots:
+        description: "Comma-separated bot actors allowed to trigger automated Claude PR review"
+        type: string
+        required: false
+        default: "github-actions,github-actions[bot]"
       context_repositories:
         description: "Newline-separated GitHub repositories to clone as read-only review context"
         type: string
@@ -436,6 +441,7 @@ jobs:
           track_progress: false
           use_sticky_comment: true
           include_fix_links: true
+          allowed_bots: ${{ inputs.claude_allowed_bots }}
           additional_permissions: |
             actions: read
           prompt: |
