@@ -307,10 +307,65 @@ jobs:
           chmod 700 "$askpass"
           export GIT_ASKPASS="$askpass"
 
+          github_api_status() {
+            local url="$1"
+            local output="$2"
+
+            curl --retry 2 --retry-delay 1 --connect-timeout 5 --max-time 20 --silent --show-error \
+              --output "$output" \
+              --write-out "%{http_code}" \
+              --header "Authorization: Bearer $READ_TOKEN" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$url" || true
+          }
+
+          token_status="$(github_api_status "https://api.github.com/user" "$status_dir/token-user.json")"
+          if [[ "$token_status" != "200" ]]; then
+            message="SA_PAT_ADRIAAN_READ_REPOS is set, but GitHub rejected it or it is not authorized for API access (HTTP ${token_status:-000}). Continuing with current-repo context only. Update the secret from 1Password, authorize it for the Simple Analytics organization if SSO is required, and grant read access to repository contents."
+            echo "::warning::$message"
+            {
+              echo "### Cross-repo context"
+              echo "$message"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           clone_concurrency="$CONTEXT_CLONE_CONCURRENCY"
           if ! [[ "$clone_concurrency" =~ ^[0-9]+$ ]] || [[ "$clone_concurrency" -lt 1 ]]; then
             clone_concurrency=8
           fi
+
+          diagnose_repo_access() {
+            local repo="$1"
+            local safe_name="$2"
+            local repo_status contents_status
+
+            repo_status="$(github_api_status "https://api.github.com/repos/$repo" "$status_dir/$safe_name.repo.json")"
+
+            case "$repo_status" in
+              200)
+                contents_status="$(github_api_status "https://api.github.com/repos/$repo/contents" "$status_dir/$safe_name.contents.json")"
+                if [[ "$contents_status" == "200" ]]; then
+                  echo "SA_PAT_ADRIAAN_READ_REPOS can read this repo via the API, but git clone failed. Confirm the token is authorized for SSO and that checkout credentials are not overriding the read token."
+                else
+                  echo "SA_PAT_ADRIAAN_READ_REPOS can see this repo, but cannot read repository contents via the API (HTTP ${contents_status:-000}). For a fine-grained PAT, add this repository and grant Contents: Read."
+                fi
+                ;;
+              401)
+                echo "SA_PAT_ADRIAAN_READ_REPOS was rejected by GitHub (HTTP 401). Update the secret from 1Password; the token is likely expired, revoked, or invalid."
+                ;;
+              403)
+                echo "SA_PAT_ADRIAAN_READ_REPOS is forbidden from this repo (HTTP 403). Authorize the token for the Simple Analytics organization if SSO is required, add this repository to the token, and grant Contents: Read."
+                ;;
+              404)
+                echo "SA_PAT_ADRIAAN_READ_REPOS cannot see this repo (HTTP 404). Add this repository to the token's selected repositories, grant Contents: Read, or verify the repo name still exists."
+                ;;
+              *)
+                echo "Could not verify SA_PAT_ADRIAAN_READ_REPOS access for this repo via the GitHub API (HTTP ${repo_status:-000}). Check token validity, organization SSO authorization, and network/API availability."
+                ;;
+            esac
+          }
 
           clone_repo() {
             local repo="$1"
@@ -319,6 +374,7 @@ jobs:
             local name="${repo#*/}"
             local target="$context_dir/$owner/$name"
             local log_file="$status_dir/$safe_name.log"
+            local diagnosis
 
             mkdir -p "$(dirname "$target")"
 
@@ -329,9 +385,10 @@ jobs:
               echo "$repo" > "$status_dir/$safe_name.ok"
               printf 'Cloned %s\n' "$repo"
             else
-              echo "$repo" > "$status_dir/$safe_name.fail"
+              diagnosis="$(diagnose_repo_access "$repo" "$safe_name")"
+              printf '%s\t%s\n' "$repo" "$diagnosis" > "$status_dir/$safe_name.fail"
               cat "$log_file"
-              echo "::warning::Could not clone $repo for Claude context. Continuing without it. Confirm SA_PAT_ADRIAAN_READ_REPOS has metadata and contents read access to this repository."
+              echo "::warning::Could not clone $repo for Claude context. Continuing without it. $diagnosis"
               rm -rf "$target"
             fi
           }
@@ -362,6 +419,10 @@ jobs:
             if [[ "$failed" != "0" ]]; then
               echo ""
               echo "$failed repositories could not be cloned. The review continued without them."
+              echo ""
+              find "$status_dir" -name '*.fail' -type f | sort | while IFS=$'\t' read -r repo diagnosis; do
+                echo "- \`$repo\`: $diagnosis"
+              done
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
