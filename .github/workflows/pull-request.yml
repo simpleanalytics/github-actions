@@ -478,13 +478,14 @@ jobs:
             PR description rules:
             - If you choose `change: needs review`, update PR #${{ github.event.pull_request.number }} with the Simple Analytics PR template before finishing. Use `gh pr edit`.
             - Preserve useful existing body content, but replace generic placeholders.
-            - `Summary` must describe what changed and why in concrete terms.
+            - Read the current PR description and commit messages before updating the body.
+            - `Summary` must describe what changed and why in concrete terms. Keep manually written context concise; the workflow adds or refreshes a commit-message `Changes` list afterward.
             - `Security implications` must be exactly one of these forms:
               - `No security impact`
               - `Has security impact - described as: <specific impact>`
             - Use `No security impact` only when you are confident the PR does not affect security, privacy, permissions, customer/user data, billing, infrastructure, production behavior, system stability, or critical functionality.
             - `Testing` must include commands/checks you personally ran during this workflow and their result. If you did not run validation, write `Not run by Claude.` and preserve any useful existing testing notes.
-            - Keep an existing `Closes ...` issue reference if one is already present. If there is no issue reference yet, leave that part for the workflow after labels are finalized.
+            - Do not create or duplicate `Closes ...` issue references. The workflow normalizes a single linked issue reference after labels are finalized.
 
             Noise control:
             - Ignore style, naming, formatting, minor refactors, low-confidence concerns, and preference-only feedback.
@@ -671,11 +672,19 @@ jobs:
         with:
           script: |
             const needsReview = 'change: needs review';
-            const pullRequest = context.payload.pull_request;
+            const eventPullRequest = context.payload.pull_request;
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const prNumber = pullRequest.number;
+            const prNumber = eventPullRequest.number;
             const nameWithOwner = `${owner}/${repo}`;
+            const changeSummaryStart = '<!-- simpleanalytics:changes-start -->';
+            const changeSummaryEnd = '<!-- simpleanalytics:changes-end -->';
+
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: prNumber,
+            });
 
             async function closingIssueRefsFromGraphql() {
               try {
@@ -728,24 +737,118 @@ jobs:
               });
             }
 
+            function escapeRegExp(value) {
+              return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            }
+
             function extractSection(body, title) {
-              const escapedTitle = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const escapedTitle = escapeRegExp(title);
               const expression = new RegExp(`(?:^|\\n)##\\s+${escapedTitle}\\s*\\n([\\s\\S]*?)(?=\\n##\\s+|$)`, 'i');
               const match = expression.exec(body || '');
               return match ? match[1].trim() : '';
             }
 
             function checked(existingChecklist, label) {
-              const expression = new RegExp(`-\\s*\\[[xX]\\]\\s*${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'i');
+              const expression = new RegExp(`-\\s*\\[[xX]\\]\\s*${escapeRegExp(label)}`, 'i');
               return expression.test(existingChecklist || '');
             }
 
+            function stripGeneratedChangeSummary(value) {
+              const expression = new RegExp(`${escapeRegExp(changeSummaryStart)}[\\s\\S]*?${escapeRegExp(changeSummaryEnd)}`, 'g');
+              return (value || '').replace(expression, '').trim();
+            }
+
             function cleanSummaryText(value) {
-              return (value || '')
+              return stripGeneratedChangeSummary(value)
                 .replace(/^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+((?:[\w.-]+\/[\w.-]+)?#\d+)\s*$/gim, '')
                 .replace(/^\s*No linked issue was created automatically\.\s*$/gim, '')
                 .replace(/\bDescribe the change\.\s*/gi, '')
                 .trim();
+            }
+
+            function visibleMarkdown(value) {
+              return (value || '').replace(/<!--[\s\S]*?-->/g, '').trim();
+            }
+
+            function compactWhitespace(value) {
+              return (value || '').replace(/\s+/g, ' ').trim();
+            }
+
+            function truncate(value, maxLength) {
+              const text = compactWhitespace(value);
+              if (text.length <= maxLength) return text;
+              return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`;
+            }
+
+            function firstBodyParagraph(message) {
+              return (message || '')
+                .split(/\r?\n\r?\n/)
+                .map((paragraph) => paragraph
+                  .split(/\r?\n/)
+                  .map((line) => line.trim())
+                  .filter((line) =>
+                    line &&
+                    !/^Signed-off-by:/i.test(line) &&
+                    !/^Co-authored-by:/i.test(line)
+                  )
+                  .join(' ')
+                )
+                .find(Boolean) || '';
+            }
+
+            function parseCommitMessage(message) {
+              const lines = (message || '').split(/\r?\n/);
+              const subject = compactWhitespace(lines.shift() || '');
+              const body = lines.join('\n').trim();
+              return {
+                subject,
+                reason: firstBodyParagraph(body),
+              };
+            }
+
+            function isBranchUpdateCommit(subject) {
+              return /^(merge (branch|remote-tracking branch|pull request)|update branch|sync (main|master)|chore:?\s*(merge|sync)\b)/i.test(subject || '');
+            }
+
+            async function buildCommitChangeSummary() {
+              try {
+                const commits = await github.paginate(github.rest.pulls.listCommits, {
+                  owner,
+                  repo,
+                  pull_number: prNumber,
+                  per_page: 100,
+                });
+
+                const parsedCommits = commits
+                  .map((commit) => parseCommitMessage(commit.commit?.message || ''))
+                  .filter((commit) => commit.subject);
+                const reviewCommits = parsedCommits.filter((commit) => !isBranchUpdateCommit(commit.subject));
+                const sourceCommits = reviewCommits.length ? reviewCommits : parsedCommits;
+                const selectedCommits = sourceCommits.slice(-6);
+                const omittedCount = sourceCommits.length - selectedCommits.length;
+
+                if (!selectedCommits.length) return '';
+
+                const bullets = selectedCommits.map((commit) => {
+                  const subject = truncate(commit.subject, 140);
+                  const reason = truncate(commit.reason, 180);
+                  return reason ? `- ${subject} - ${reason}` : `- ${subject}`;
+                });
+
+                if (omittedCount > 0) {
+                  bullets.push(`- ...and ${omittedCount} earlier commit(s).`);
+                }
+
+                return [
+                  changeSummaryStart,
+                  'Changes:',
+                  ...bullets,
+                  changeSummaryEnd,
+                ].join('\n');
+              } catch (error) {
+                core.warning(`Could not build commit-based PR summary: ${error.message}`);
+                return '';
+              }
             }
 
             async function buildFallbackSummary() {
@@ -867,8 +970,14 @@ jobs:
             const existingSecurity = extractSection(currentBody, 'Security implications');
             const existingTesting = extractSection(currentBody, 'Testing');
             const existingChecklist = extractSection(currentBody, 'Checklist');
-            const summary = cleanSummaryText(existingSummary) || await buildFallbackSummary();
-            const issueContent = buildIssueContent(summary);
+            const manualSummary = cleanSummaryText(existingSummary);
+            const fallbackSummary = manualSummary ? '' : await buildFallbackSummary();
+            const commitChangeSummary = await buildCommitChangeSummary();
+            const summary = [
+              manualSummary || fallbackSummary,
+              commitChangeSummary,
+            ].filter(Boolean).join('\n\n').trim();
+            const issueContent = buildIssueContent(visibleMarkdown(summary));
             const linkedIssues = uniqueRefs([
               ...(await closingIssueRefsFromGraphql()),
               ...closingIssueRefsFromBody(currentBody),

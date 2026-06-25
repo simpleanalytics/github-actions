@@ -26,7 +26,7 @@ Claude reviews full PR diffs on `opened` and `reopened`, and only the newly push
 - `change: needs review` for changes affecting security, data protection, system stability, customer/user data, or critical functionality.
 - `change: routine` for internal tools or low-risk changes such as design updates or content modifications.
 
-For `change: needs review`, the workflow ensures the Simple Analytics PR template is used and tries to create a linked tracking issue that describes the problem the PR is fixing. It first tries `simpleanalytics/dashboard`; if that is not accessible, it falls back to the current repository. If issue creation still fails, the workflow continues and posts the suggested issue content in a collapsed PR comment.
+For `change: needs review`, the workflow ensures the Simple Analytics PR template is used, keeps the Summary updated from the current PR description and commit messages, and tries to create a linked tracking issue that describes the problem the PR is fixing. It first tries `simpleanalytics/dashboard`; if that is not accessible, it falls back to the current repository. If issue creation still fails, the workflow continues and posts the suggested issue content in a collapsed PR comment.
 
 Set `internal_app: true` for internal apps where low-risk changes that do not touch customer/user data, security, privacy, or critical functionality should stay `change: routine` and skip approval-oriented enforcement.
 
