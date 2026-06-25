@@ -135,23 +135,138 @@ jobs:
           git remote add base "https://github.com/${{ github.repository }}.git" 2>/dev/null || git remote set-url base "https://github.com/${{ github.repository }}.git"
           git fetch --no-tags --prune --depth=200 base "$BASE_REF"
 
+      - name: Find previous Claude review checkpoint
+        id: previous_review
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const nameWithOwner = `${owner}/${repo}`;
+            const issueNumber = context.payload.pull_request.number;
+            const trustedBotLogins = new Set(['github-actions[bot]']);
+            const markerPattern = /<!--\s*simpleanalytics-claude-pr-review-checkpoint\s*([\s\S]*?)\s*-->/g;
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            });
+
+            const checkpoints = [];
+            const fallbackClaudeComments = [];
+
+            for (const comment of comments) {
+              if (!trustedBotLogins.has(comment.user?.login)) continue;
+
+              const body = comment.body || '';
+              let match;
+              markerPattern.lastIndex = 0;
+              while ((match = markerPattern.exec(body)) !== null) {
+                try {
+                  const checkpoint = JSON.parse(match[1].trim());
+
+                  if (
+                    checkpoint.version === 1 &&
+                    checkpoint.repository === nameWithOwner &&
+                    Number(checkpoint.pull_request) === Number(issueNumber) &&
+                    /^[a-f0-9]{40}$/i.test(checkpoint.head_sha || '')
+                  ) {
+                    checkpoints.push({
+                      headSha: checkpoint.head_sha,
+                      reviewedAt: checkpoint.reviewed_at || comment.updated_at || comment.created_at,
+                      commentId: comment.id,
+                    });
+                  }
+                } catch (error) {
+                  core.warning(`Ignoring invalid Claude review checkpoint in comment ${comment.id}: ${error.message}`);
+                }
+              }
+
+              if (/\bclaude\b/i.test(body)) {
+                fallbackClaudeComments.push({
+                  reviewedAt: comment.updated_at || comment.created_at,
+                  commentId: comment.id,
+                });
+              }
+            }
+
+            checkpoints.sort((left, right) => new Date(right.reviewedAt) - new Date(left.reviewedAt));
+            fallbackClaudeComments.sort((left, right) => new Date(right.reviewedAt) - new Date(left.reviewedAt));
+
+            const checkpoint = checkpoints[0];
+            if (checkpoint) {
+              core.setOutput('head_sha', checkpoint.headSha);
+              core.setOutput('reviewed_at', checkpoint.reviewedAt);
+              core.setOutput('source', `checkpoint-comment-${checkpoint.commentId}`);
+              core.info(`Found previous Claude review checkpoint ${checkpoint.headSha} from ${checkpoint.reviewedAt}.`);
+              return;
+            }
+
+            const fallback = fallbackClaudeComments[0];
+            if (fallback) {
+              core.setOutput('head_sha', '');
+              core.setOutput('reviewed_at', fallback.reviewedAt);
+              core.setOutput('source', `claude-comment-${fallback.commentId}`);
+              core.info(`No checkpoint marker found. Falling back to latest trusted Claude bot comment from ${fallback.reviewedAt}.`);
+              return;
+            }
+
+            core.setOutput('head_sha', '');
+            core.setOutput('reviewed_at', '');
+            core.setOutput('source', '');
+            core.info('No previous Claude review checkpoint found.');
+
       - name: Resolve review scope
         id: review_scope
         env:
-          EVENT_ACTION: ${{ github.event.action }}
-          BEFORE_SHA: ${{ github.event.before }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LAST_REVIEWED_SHA: ${{ steps.previous_review.outputs.head_sha }}
+          LAST_REVIEWED_AT: ${{ steps.previous_review.outputs.reviewed_at }}
+          LAST_REVIEW_SOURCE: ${{ steps.previous_review.outputs.source }}
         run: |
-          if [[ "$EVENT_ACTION" == "synchronize" && -n "$BEFORE_SHA" && "$BEFORE_SHA" != "$HEAD_SHA" ]]; then
-            echo "mode=incremental" >> "$GITHUB_OUTPUT"
-            echo "diff_range=$BEFORE_SHA..$HEAD_SHA" >> "$GITHUB_OUTPUT"
-            echo "scope_description=Only review commits added by this push: $BEFORE_SHA..$HEAD_SHA." >> "$GITHUB_OUTPUT"
-          else
-            echo "mode=full-pr" >> "$GITHUB_OUTPUT"
-            echo "diff_range=$BASE_SHA...$HEAD_SHA" >> "$GITHUB_OUTPUT"
-            echo "scope_description=Review the full pull request diff: $BASE_SHA...$HEAD_SHA." >> "$GITHUB_OUTPUT"
+          full_pr_range="$BASE_SHA...$HEAD_SHA"
+          mode="full-pr"
+          diff_range="$full_pr_range"
+          scope_description="Review the full pull request diff: $full_pr_range."
+          last_review_note="No previous trusted Claude review checkpoint was found."
+
+          if [[ -n "$LAST_REVIEWED_SHA" ]]; then
+            if git cat-file -e "$LAST_REVIEWED_SHA^{commit}" 2>/dev/null && git merge-base --is-ancestor "$LAST_REVIEWED_SHA" "$HEAD_SHA"; then
+              mode="since-last-claude-review"
+              diff_range="$LAST_REVIEWED_SHA..$HEAD_SHA"
+              scope_description="Review current PR changes not checked since Claude last reviewed commit $LAST_REVIEWED_SHA. Use $full_pr_range as the current full PR diff and ignore base-only branch update changes."
+              last_review_note="Last trusted Claude checkpoint: $LAST_REVIEWED_SHA from $LAST_REVIEW_SOURCE."
+            else
+              echo "::warning::Previous Claude checkpoint $LAST_REVIEWED_SHA is not available on the current PR branch. Reviewing the full PR diff instead."
+              last_review_note="Previous trusted Claude checkpoint $LAST_REVIEWED_SHA from $LAST_REVIEW_SOURCE is not available on this branch, so the workflow fell back to the full PR diff."
+            fi
+          elif [[ -n "$LAST_REVIEWED_AT" ]]; then
+            checkpoint_sha="$(git rev-list -n 1 --before="$LAST_REVIEWED_AT" "$HEAD_SHA" 2>/dev/null || true)"
+            if [[ -n "$checkpoint_sha" ]] && git merge-base --is-ancestor "$checkpoint_sha" "$HEAD_SHA"; then
+              mode="since-last-claude-comment"
+              diff_range="$checkpoint_sha..$HEAD_SHA"
+              scope_description="Review current PR changes not checked since the latest trusted Claude bot comment at $LAST_REVIEWED_AT. Use $full_pr_range as the current full PR diff and ignore base-only branch update changes."
+              last_review_note="No checkpoint marker existed. Approximated the last reviewed commit as $checkpoint_sha from trusted Claude bot comment time $LAST_REVIEWED_AT."
+            else
+              echo "::warning::Could not map the latest trusted Claude bot comment at $LAST_REVIEWED_AT to a commit. Reviewing the full PR diff instead."
+              last_review_note="A trusted Claude bot comment existed at $LAST_REVIEWED_AT, but it could not be mapped to a commit, so the workflow fell back to the full PR diff."
+            fi
           fi
+
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "diff_range=$diff_range" >> "$GITHUB_OUTPUT"
+          echo "full_pr_diff_range=$full_pr_range" >> "$GITHUB_OUTPUT"
+          {
+            echo "scope_description<<EOF"
+            echo "$scope_description"
+            echo "EOF"
+            echo "last_review_note<<EOF"
+            echo "$last_review_note"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout Simple Analytics context
         id: checkout_context
@@ -266,16 +381,20 @@ jobs:
             INTERNAL APP: ${{ inputs.internal_app }}
             REVIEW MODE: ${{ steps.review_scope.outputs.mode }}
             REVIEW RANGE: ${{ steps.review_scope.outputs.diff_range }}
+            FULL PR RANGE: ${{ steps.review_scope.outputs.full_pr_diff_range }}
             REVIEW SCOPE: ${{ steps.review_scope.outputs.scope_description }}
+            LAST REVIEW: ${{ steps.review_scope.outputs.last_review_note }}
             CROSS-REPO CONTEXT DIR: ${{ steps.checkout_context.outputs.context_dir }}
 
             Review this pull request for security vulnerabilities, privacy risks, correctness bugs, data loss, runtime/deployment failures, and high-confidence regressions.
 
             Scope rules:
             - For full-pr mode, review the full PR diff.
-            - For incremental mode, focus findings on the REVIEW RANGE only. Do not report issues that already existed earlier in the PR unless they are critical, exploitable, or made materially worse by the new commits.
+            - For since-last-claude-review and since-last-claude-comment mode, focus findings on current PR changes that were not checked after the last trusted Claude review checkpoint.
+            - REVIEW RANGE may include base branch update commits. Use FULL PR RANGE as the current pull request diff and do not report base-only branch update changes.
+            - Do not report issues that already existed before the last trusted Claude review checkpoint unless they are critical, exploitable, or made materially worse by the new commits.
             - For SDLC label classification, consider the full pull request, not only the incremental range.
-            - Use local git commands such as `git diff ${{ steps.review_scope.outputs.diff_range }}` when helpful.
+            - Use local git commands such as `git diff ${{ steps.review_scope.outputs.diff_range }}` and `git diff ${{ steps.review_scope.outputs.full_pr_diff_range }}` when helpful.
             - You may inspect read-only cross-repo context under `${{ steps.checkout_context.outputs.context_dir }}`. Do not edit files there.
 
             SDLC label rules:
@@ -308,6 +427,113 @@ jobs:
           claude_args: |
             --model ${{ inputs.claude_model }}
             --allowedTools "Read,Edit,MultiEdit,Write,Grep,Glob,LS,mcp__github_inline_comment__create_inline_comment,Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git log:*),Bash(git show:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue edit:*),Bash(gh issue view:*),Bash(find:*),Bash(ls:*)"
+
+      - name: Resolve reviewed HEAD
+        id: reviewed_head
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Record Claude review checkpoint
+        uses: actions/github-script@v9
+        env:
+          REVIEWED_HEAD_SHA: ${{ steps.reviewed_head.outputs.sha }}
+          REVIEW_SCOPE_MODE: ${{ steps.review_scope.outputs.mode }}
+          REVIEW_RANGE: ${{ steps.review_scope.outputs.diff_range }}
+          FULL_PR_RANGE: ${{ steps.review_scope.outputs.full_pr_diff_range }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const nameWithOwner = `${owner}/${repo}`;
+            const issueNumber = context.payload.pull_request.number;
+            const reviewedHeadSha = process.env.REVIEWED_HEAD_SHA;
+            const trustedBotLogin = 'github-actions[bot]';
+            const markerName = 'simpleanalytics-claude-pr-review-checkpoint';
+            const standaloneName = 'simpleanalytics-claude-pr-review-checkpoint-comment';
+            const markerPattern = /<!--\s*simpleanalytics-claude-pr-review-checkpoint\s*([\s\S]*?)\s*-->/;
+            const markerGlobalPattern = /<!--\s*simpleanalytics-claude-pr-review-checkpoint\s*[\s\S]*?\s*-->/g;
+
+            if (!/^[a-f0-9]{40}$/i.test(reviewedHeadSha || '')) {
+              throw new Error(`Cannot record Claude review checkpoint; invalid reviewed head SHA: ${reviewedHeadSha}`);
+            }
+
+            const checkpoint = {
+              version: 1,
+              repository: nameWithOwner,
+              pull_request: issueNumber,
+              head_sha: reviewedHeadSha,
+              base_sha: context.payload.pull_request.base.sha,
+              review_mode: process.env.REVIEW_SCOPE_MODE,
+              review_range: process.env.REVIEW_RANGE,
+              full_pr_range: process.env.FULL_PR_RANGE,
+              reviewed_at: new Date().toISOString(),
+              workflow_run_id: String(context.runId),
+              workflow_run_attempt: String(context.runAttempt),
+            };
+
+            const marker = [
+              `<!-- ${markerName}`,
+              JSON.stringify(checkpoint, null, 2),
+              '-->',
+            ].join('\n');
+
+            function checkpointBody() {
+              return [
+                `<details><summary>Claude review checkpoint</summary>`,
+                '',
+                `Reviewed commit \`${reviewedHeadSha}\`. This is used to keep later automated reviews focused on changes Claude has not checked yet.`,
+                '',
+                `<!-- ${standaloneName} -->`,
+                marker,
+                '',
+                '</details>',
+              ].join('\n');
+            }
+
+            function withMarker(body) {
+              if (markerPattern.test(body || '')) {
+                return body.replace(markerGlobalPattern, marker);
+              }
+
+              return `${(body || '').trim()}\n\n${marker}`.trim();
+            }
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number: issueNumber,
+              per_page: 100,
+            });
+
+            const ownBotComments = comments.filter((comment) => comment.user?.login === trustedBotLogin);
+            const newestFirst = (left, right) => new Date(right.updated_at || right.created_at) - new Date(left.updated_at || left.created_at);
+            const standaloneCheckpoint = ownBotComments
+              .filter((comment) => (comment.body || '').includes(`<!-- ${standaloneName} -->`))
+              .sort(newestFirst)[0];
+            const markedComment = ownBotComments
+              .filter((comment) => markerPattern.test(comment.body || ''))
+              .sort(newestFirst)[0];
+            const claudeComment = ownBotComments
+              .filter((comment) => /\bclaude\b/i.test(comment.body || ''))
+              .sort(newestFirst)[0];
+
+            const target = standaloneCheckpoint || markedComment || claudeComment;
+            if (target) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: target.id,
+                body: standaloneCheckpoint ? checkpointBody() : withMarker(target.body || ''),
+              });
+              core.info(`Updated Claude review checkpoint in comment ${target.id}.`);
+            } else {
+              const { data: comment } = await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: issueNumber,
+                body: checkpointBody(),
+              });
+              core.info(`Created Claude review checkpoint comment ${comment.id}.`);
+            }
 
       - name: Finalize SDLC label
         id: sdlc_label
