@@ -73,6 +73,9 @@ jobs:
   claude-review:
     runs-on: ubuntu-latest
     if: ${{ !github.event.pull_request.draft && github.event_name == 'pull_request' && contains(fromJson('["opened", "reopened", "synchronize"]'), github.event.action) }}
+    concurrency:
+      group: claude-pr-review-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     permissions:
       contents: write
       pull-requests: write
@@ -431,6 +434,66 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Capture existing linked issue
+        id: existing_issue
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const nameWithOwner = `${owner}/${repo}`;
+            const prNumber = context.payload.pull_request.number;
+            const refs = [];
+
+            function addBodyRefs(body) {
+              const pattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+((?:[\w.-]+\/[\w.-]+)?#\d+)/gi;
+              let match;
+
+              while ((match = pattern.exec(body || '')) !== null) {
+                refs.push(match[1]);
+              }
+            }
+
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: prNumber,
+            });
+            addBodyRefs(pullRequest.body || '');
+
+            try {
+              const result = await github.graphql(`
+                query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $number) {
+                      closingIssuesReferences(first: 20) {
+                        nodes {
+                          number
+                          repository {
+                            nameWithOwner
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `, { owner, repo, number: prNumber });
+
+              for (const issue of result.repository.pullRequest.closingIssuesReferences.nodes) {
+                refs.push(issue.repository.nameWithOwner === nameWithOwner
+                  ? `#${issue.number}`
+                  : `${issue.repository.nameWithOwner}#${issue.number}`);
+              }
+            } catch (error) {
+              core.warning(`Could not capture closingIssuesReferences via GraphQL: ${error.message}`);
+            }
+
+            const issueRef = refs.find(Boolean) || '';
+            core.setOutput('ref', issueRef);
+            core.info(issueRef
+              ? `Captured existing linked issue ${issueRef}.`
+              : 'No existing linked issue was found.');
+
       - name: Run Claude PR review
         id: claude
         uses: anthropics/claude-code-action@v1
@@ -455,6 +518,7 @@ jobs:
             REVIEW SCOPE: ${{ steps.review_scope.outputs.scope_description }}
             LAST REVIEW: ${{ steps.review_scope.outputs.last_review_note }}
             CROSS-REPO CONTEXT DIR: ${{ steps.checkout_context.outputs.context_dir }}
+            EXISTING LINKED ISSUE: ${{ steps.existing_issue.outputs.ref }}
 
             Review this pull request for security vulnerabilities, privacy risks, correctness bugs, data loss, runtime/deployment failures, and high-confidence regressions.
 
@@ -466,6 +530,12 @@ jobs:
             - For SDLC label classification, consider the full pull request, not only the incremental range.
             - Use local git commands such as `git diff ${{ steps.review_scope.outputs.diff_range }}` and `git diff ${{ steps.review_scope.outputs.full_pr_diff_range }}` when helpful.
             - You may inspect read-only cross-repo context under `${{ steps.checkout_context.outputs.context_dir }}`. Do not edit files there.
+
+            Documentation review rules:
+            - When the pull request changes a user-facing feature, workflow, setting, integration, API, or other documented behavior, inspect the read-only documentation repository at `${{ steps.checkout_context.outputs.context_dir }}/simpleanalytics/docs`.
+            - Check whether the existing documentation accurately covers the new behavior, including any changed instructions, limitations, examples, or screenshots.
+            - If documentation is missing or outdated, leave a concise actionable suggestion in the PR review. Name the relevant documentation file or section when possible and describe what should be added or changed.
+            - Do not edit the documentation repository from this workflow. Do not request documentation changes for internal-only changes or changes that do not affect documented user behavior.
 
             SDLC label rules:
             - Apply exactly one of these labels to PR #${{ github.event.pull_request.number }} using `gh issue edit`: `change: needs review` or `change: routine`.
@@ -485,7 +555,16 @@ jobs:
               - `Has security impact - described as: <specific impact>`
             - Use `No security impact` only when you are confident the PR does not affect security, privacy, permissions, customer/user data, billing, infrastructure, production behavior, system stability, or critical functionality.
             - `Testing` must include commands/checks you personally ran during this workflow and their result. If you did not run validation, write `Not run by Claude.` and preserve any useful existing testing notes.
-            - Do not create or duplicate `Closes ...` issue references. The workflow normalizes a single linked issue reference after labels are finalized.
+            - If EXISTING LINKED ISSUE is non-empty, preserve exactly one `Closes EXISTING LINKED ISSUE` line. Otherwise, do not add a `Closes ...` reference; the workflow adds one after creating the issue.
+
+            Issue description rules:
+            - The issue description is a separate writing task from the PR description. Do not copy or adapt the PR `Summary`.
+            - If you choose `change: needs review` and EXISTING LINKED ISSUE is empty, return an issue draft through the structured output fields.
+            - `issue_title` must describe the unresolved problem. Do not prefix it with `Track:` and do not refer to the pull request.
+            - `issue_problem` must describe the current problem, symptoms, impact, and useful known context in present tense. Do not claim that anything was fixed, changed, added, or implemented, and do not refer to a PR.
+            - `issue_suggested_changes` must contain concise proposed outcomes, investigation areas, or requirements. Treat them as suggestions, not completed work or an exact implementation.
+            - Do not include Markdown section headings in the structured fields and do not prefix suggested-change entries with bullets; the workflow adds the issue formatting.
+            - If you choose `change: routine` or EXISTING LINKED ISSUE is non-empty, return empty strings and an empty array for the issue draft fields.
 
             Noise control:
             - Ignore style, naming, formatting, minor refactors, low-confidence concerns, and preference-only feedback.
@@ -503,12 +582,14 @@ jobs:
             - If you changed files, keep the comment short and list the fix plus any validation you ran.
             - If validation fails or you cannot safely validate, say that plainly without long reasoning.
             - Do not create tracking issues. The workflow handles linked issue creation and final checklist enforcement after labels are finalized.
+            - Your final response must satisfy the configured JSON schema. Use it only for the separate issue draft fields; continue to post review findings through the normal GitHub review tools.
 
             Extra repository instructions:
             ${{ inputs.claude_extra_prompt }}
           claude_args: |
             --model ${{ inputs.claude_model }}
             --allowedTools "Read,Edit,MultiEdit,Write,Grep,Glob,LS,mcp__github_inline_comment__create_inline_comment,Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git log:*),Bash(git show:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr edit:*),Bash(gh issue edit:*),Bash(gh issue view:*),Bash(find:*),Bash(ls:*)"
+            --json-schema '{"type":"object","properties":{"issue_title":{"type":"string"},"issue_problem":{"type":"string"},"issue_suggested_changes":{"type":"array","items":{"type":"string"}}},"required":["issue_title","issue_problem","issue_suggested_changes"],"additionalProperties":false}'
 
       - name: Resolve reviewed HEAD
         id: reviewed_head
@@ -669,6 +750,9 @@ jobs:
       - name: Enforce review-required PR template
         if: ${{ steps.sdlc_label.outputs.requires_review == 'true' }}
         uses: actions/github-script@v9
+        env:
+          EXISTING_ISSUE_REF: ${{ steps.existing_issue.outputs.ref }}
+          CLAUDE_ISSUE_DRAFT: ${{ steps.claude.outputs.structured_output }}
         with:
           script: |
             const needsReview = 'change: needs review';
@@ -764,10 +848,6 @@ jobs:
                 .replace(/^\s*No linked issue was created automatically\.\s*$/gim, '')
                 .replace(/\bDescribe the change\.\s*/gi, '')
                 .trim();
-            }
-
-            function visibleMarkdown(value) {
-              return (value || '').replace(/<!--[\s\S]*?-->/g, '').trim();
             }
 
             function compactWhitespace(value) {
@@ -929,23 +1009,47 @@ jobs:
               return Boolean(raw && !/^Not run by Claude\.?$/i.test(raw) && !/^Describe how this was tested\.?$/i.test(raw));
             }
 
-            function buildIssueContent(problemSummary) {
-              const title = `Track: ${pullRequest.title}`;
+            function issueDraftFromClaude() {
+              try {
+                const parsed = JSON.parse(process.env.CLAUDE_ISSUE_DRAFT || '{}');
+                const title = compactWhitespace(parsed.issue_title || '').replace(/^Track:\s*/i, '');
+                const problem = (parsed.issue_problem || '').trim();
+                const suggestedChanges = Array.isArray(parsed.issue_suggested_changes)
+                  ? parsed.issue_suggested_changes
+                    .map((item) => String(item || '').trim().replace(/^[-*]\s+/, ''))
+                    .filter(Boolean)
+                  : [];
+
+                if (title && problem && suggestedChanges.length) {
+                  return { title, problem, suggestedChanges };
+                }
+
+                core.warning('Claude did not return a complete issue draft. Using neutral fallback issue content.');
+              } catch (error) {
+                core.warning(`Could not parse Claude issue draft: ${error.message}. Using neutral fallback issue content.`);
+              }
+
+              return {
+                title: compactWhitespace(pullRequest.title).replace(/^Track:\s*/i, ''),
+                problem: 'The reported behavior remains unresolved and needs investigation.',
+                suggestedChanges: [
+                  'Confirm the affected behavior, impact, and underlying cause.',
+                  'Define and validate an appropriate solution.',
+                ],
+              };
+            }
+
+            function buildIssueContent(issueDraft) {
+              const title = truncate(issueDraft.title, 240);
+              const suggestedChanges = issueDraft.suggestedChanges.map((item) => `- ${item}`);
               const body = [
                 '## Problem',
                 '',
-                problemSummary || pullRequest.title,
+                issueDraft.problem,
                 '',
-                '## Pull request',
+                '## Suggested changes',
                 '',
-                `- Repository: ${nameWithOwner}`,
-                `- Pull request: ${pullRequest.html_url}`,
-                `- Author: @${pullRequest.user.login}`,
-                `- SDLC label: \`${needsReview}\``,
-                '',
-                '## Fix',
-                '',
-                'This pull request is expected to address the problem above. Review the linked PR for the exact implementation, validation, and approval discussion.',
+                ...suggestedChanges,
               ].join('\n');
 
               return { title, body };
@@ -977,8 +1081,9 @@ jobs:
               manualSummary || fallbackSummary,
               commitChangeSummary,
             ].filter(Boolean).join('\n\n').trim();
-            const issueContent = buildIssueContent(visibleMarkdown(summary));
+            const existingIssueRef = (process.env.EXISTING_ISSUE_REF || '').trim();
             const linkedIssues = uniqueRefs([
+              ...(existingIssueRef ? [{ ref: existingIssueRef, url: '' }] : []),
               ...(await closingIssueRefsFromGraphql()),
               ...closingIssueRefsFromBody(currentBody),
             ]);
@@ -986,6 +1091,7 @@ jobs:
             let issueRef = linkedIssues[0]?.ref || '';
 
             if (!issueRef) {
+              const issueContent = buildIssueContent(issueDraftFromClaude());
               const targets = [
                 { owner: 'simpleanalytics', repo: 'dashboard' },
                 { owner, repo },
