@@ -7,7 +7,7 @@ on:
         description: "Claude model used for manual @claude requests"
         type: string
         required: false
-        default: claude-opus-4-8
+        default: claude-opus-5
       claude_trigger_phrase:
         description: "Phrase that triggers Claude in comments, reviews, issues, and issue titles"
         type: string
