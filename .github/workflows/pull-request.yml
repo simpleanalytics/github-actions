@@ -588,7 +588,6 @@ jobs:
             ${{ inputs.claude_extra_prompt }}
           claude_args: |
             --model ${{ inputs.claude_model }}
-            --allowedTools "Read,Edit,MultiEdit,Write,Grep,Glob,LS,mcp__github_inline_comment__create_inline_comment,Bash(git diff:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git log:*),Bash(git show:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr edit:*),Bash(gh issue edit:*),Bash(gh issue view:*),Bash(find:*),Bash(ls:*)"
             --json-schema '{"type":"object","properties":{"issue_title":{"type":"string"},"issue_problem":{"type":"string"},"issue_suggested_changes":{"type":"array","items":{"type":"string"}}},"required":["issue_title","issue_problem","issue_suggested_changes"],"additionalProperties":false}'
 
       - name: Resolve reviewed HEAD
