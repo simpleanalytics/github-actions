@@ -26,7 +26,9 @@ Claude reviews full PR diffs on `opened` and `reopened`, and only the newly push
 - `change: needs review` for changes affecting security, data protection, system stability, customer/user data, or critical functionality.
 - `change: routine` for internal tools or low-risk changes such as design updates or content modifications.
 
-For `change: needs review`, the workflow ensures the Simple Analytics PR template is used and keeps the Summary updated from the current PR description and commit messages. Claude separately drafts a problem-focused tracking issue with `Problem` and `Suggested changes` sections, so completed PR details are not copied into the issue. The PR links to the issue with a `Closes` reference; the issue does not link back to the PR. Later review runs reuse that issue instead of creating duplicates.
+For `change: needs review`, the workflow ensures the required `Summary`, `Security implications`, `Testing`, and `Checklist` sections exist. Human-authored descriptions remain authoritative: their wording, extra sections, and images are preserved while missing required sections are added. Bot- or AI-authored descriptions may be normalized from their existing content. Images and attachments are preserved in either case, and automation never creates checklist items beyond `Linked to an issue`, `Tested`, and `Asked for a review`.
+
+Claude separately drafts a problem-focused tracking issue with `Problem` and `Suggested changes` sections, so completed PR details are not copied into the issue. The PR links to the issue with a `Closes` reference; the issue does not link back to the PR. Later review runs reuse that issue instead of creating duplicates.
 
 The workflow first tries to create the issue in `simpleanalytics/dashboard`; if that is not accessible, it falls back to the current repository. If issue creation still fails, the workflow continues and posts the suggested issue content in a collapsed PR comment.
 
