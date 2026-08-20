@@ -153,7 +153,7 @@ jobs:
             const nameWithOwner = `${owner}/${repo}`;
             const issueNumber = context.payload.pull_request.number;
             const trustedBotLogins = new Set(['github-actions[bot]']);
-            const markerPattern = /<!--\s*simpleanalytics-claude-pr-review-checkpoint\s*([\s\S]*?)\s*-->/g;
+            const markerPattern = /<!--\s*simpleanalytics-claude-pr-review-checkpoint\s+([\s\S]*?)\s*-->/g;
 
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner,
@@ -588,6 +588,7 @@ jobs:
             ${{ inputs.claude_extra_prompt }}
           claude_args: |
             --model ${{ inputs.claude_model }}
+            --allowedTools "Agent,AskUserQuestion,Bash,Glob,Grep,LS,Read,Edit,MultiEdit,Write,NotebookRead,NotebookEdit,TodoRead,TodoWrite,Skill,WebFetch,WebSearch,mcp__github__*,mcp__github_comment__*,mcp__github_file_ops__*,mcp__github_inline_comment__*,mcp__github_ci__*"
             --json-schema '{"type":"object","properties":{"issue_title":{"type":"string"},"issue_problem":{"type":"string"},"issue_suggested_changes":{"type":"array","items":{"type":"string"}}},"required":["issue_title","issue_problem","issue_suggested_changes"],"additionalProperties":false}'
 
       - name: Resolve reviewed HEAD
@@ -611,8 +612,8 @@ jobs:
             const trustedBotLogin = 'github-actions[bot]';
             const markerName = 'simpleanalytics-claude-pr-review-checkpoint';
             const standaloneName = 'simpleanalytics-claude-pr-review-checkpoint-comment';
-            const markerPattern = /<!--\s*simpleanalytics-claude-pr-review-checkpoint\s*([\s\S]*?)\s*-->/;
-            const markerGlobalPattern = /<!--\s*simpleanalytics-claude-pr-review-checkpoint\s*[\s\S]*?\s*-->/g;
+            const markerPattern = /<!--\s*simpleanalytics-claude-pr-review-checkpoint\s+([\s\S]*?)\s*-->/;
+            const markerGlobalPattern = /<!--\s*simpleanalytics-claude-pr-review-checkpoint\s+[\s\S]*?\s*-->/g;
 
             if (!/^[a-f0-9]{40}$/i.test(reviewedHeadSha || '')) {
               throw new Error(`Cannot record Claude review checkpoint; invalid reviewed head SHA: ${reviewedHeadSha}`);
