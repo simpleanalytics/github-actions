@@ -23,6 +23,11 @@ on:
         type: string
         required: false
         default: ""
+      claude_require_new_pr:
+        description: "Block pushes to the triggering branch; Claude pushes fixes to a new claude/* branch and opens a separate pull request instead"
+        type: boolean
+        required: false
+        default: true
     outputs:
       test_ref:
         description: "Pull request branch ref that a caller can pass to its local CI workflow"
@@ -48,6 +53,28 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Restrict pushes to new claude/* branches
+        if: ${{ inputs.claude_require_new_pr }}
+        run: |
+          cat > .git/hooks/pre-push <<'EOF'
+          #!/usr/bin/env bash
+          # Installed by the Claude workflow (claude_require_new_pr: true).
+          # Only claude/* branches may be pushed; the triggering branch and all
+          # other existing branches are rejected.
+          blocked=0
+          while read -r local_ref local_sha remote_ref remote_sha; do
+            case "$remote_ref" in
+              refs/heads/claude/*) ;;
+              *)
+                echo "pre-push hook: pushing to $remote_ref is not allowed; only claude/* branches may be pushed" >&2
+                blocked=1
+                ;;
+            esac
+          done
+          exit "$blocked"
+          EOF
+          chmod +x .git/hooks/pre-push
+
       - name: Run Claude Code
         id: claude
         uses: anthropics/claude-code-action@v1
@@ -58,8 +85,8 @@ jobs:
             actions: read
           claude_args: |
             --model ${{ inputs.claude_model }}
-            --allowedTools "${{ inputs.claude_allowed_tools }}"
-            --append-system-prompt "## General\n\nIf requirements are genuinely ambiguous and you cannot make a reasonable assumption, post all your questions in a single comment and stop. Do not ask about things you can decide yourself or infer from the codebase.\n\n## Pull request\n\nWhen creating or updating a pull request, use this PR template for the body:\n\n```\n## Summary\n\nCloses #<issue_number>\n\nDescribe the change.\n\n## Security implications\n\n- [ ] No security impact\n- [ ] Has security impact - described as:\n\n## Testing\n\nDescribe how this was tested.\n\n## Checklist\n\n- [ ] Linked to an issue\n- [ ] Tested\n- [ ] Asked for a review\n```\n\nFill in the template with the relevant details for the PR."
+            --allowedTools "${{ inputs.claude_allowed_tools }}${{ inputs.claude_require_new_pr && ',Bash(git checkout -b claude/:*),Bash(git switch -c claude/:*),Bash(gh pr create:*)' || '' }}"
+            --append-system-prompt "## General\n\nIf requirements are genuinely ambiguous and you cannot make a reasonable assumption, post all your questions in a single comment and stop. Do not ask about things you can decide yourself or infer from the codebase.\n\n## Pull request\n\nWhen creating or updating a pull request, use this PR template for the body:\n\n```\n## Summary\n\nCloses #<issue_number>\n\nDescribe the change.\n\n## Security implications\n\n- [ ] No security impact\n- [ ] Has security impact - described as:\n\n## Testing\n\nDescribe how this was tested.\n\n## Checklist\n\n- [ ] Linked to an issue\n- [ ] Tested\n- [ ] Asked for a review\n```\n\nFill in the template with the relevant details for the PR.${{ inputs.claude_require_new_pr && '\n\n## Branch policy\n\nDo not push to the branch this workflow was triggered from, nor to any other existing branch - a pre-push hook rejects such pushes. To change code: create a new branch named claude/<short-description> from the current HEAD, commit there, push that branch, and open a pull request with gh pr create. If you were triggered from a pull request, use that PR branch as the base of the new pull request; otherwise use the repository default branch as base.' || '' }}"
             ${{ inputs.claude_extra_args }}
 
   resolve_test_ref:
