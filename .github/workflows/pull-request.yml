@@ -494,6 +494,156 @@ jobs:
               ? `Captured existing linked issue ${issueRef}.`
               : 'No existing linked issue was found.');
 
+      - name: Classify PR description provenance
+        id: description_provenance
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = context.payload.pull_request.number;
+            const capturedAt = new Date().toISOString();
+            const workflowLogins = new Set(['github-actions', 'github-actions[bot]']);
+            const knownAutomatedLogins = new Set([
+              'claude',
+              'claude[bot]',
+              'github-actions',
+              'github-actions[bot]',
+              'simple-analytics-ai',
+              'simple-analytics-ai[bot]',
+            ]);
+
+            function normalizedLogin(login) {
+              return String(login || '').trim().toLowerCase();
+            }
+
+            function loginLooksAutomated(login) {
+              const normalized = normalizedLogin(login);
+              if (!normalized) return false;
+              if (knownAutomatedLogins.has(normalized)) return true;
+              return /(?:^|[-_])(ai|bot|chatgpt|claude|codex|openai)(?:$|[-_\[])/i.test(normalized);
+            }
+
+            function actorIsAutomated(actor) {
+              const type = actor?.type || actor?.__typename || '';
+              return type === 'Bot' || type === 'App' || loginLooksAutomated(actor?.login);
+            }
+
+            function actorIsHuman(actor) {
+              const type = actor?.type || actor?.__typename || '';
+              return type === 'User' && !loginLooksAutomated(actor?.login);
+            }
+
+            function identityTextLooksAutomated(...values) {
+              const text = values.filter(Boolean).join(' ');
+              return /\b(?:chatgpt|claude|codex|openai)\b|codex@simpleanalytics\.invalid|@anthropic\.com/i.test(text);
+            }
+
+            function bodyLooksAutomated(body) {
+              return [
+                /(?:generated|written|created)\s+(?:with|by)\s+(?:an?\s+)?(?:ai|chatgpt|claude|codex|openai)\b/i,
+                /co-authored-by:\s*(?:chatgpt|claude|codex|openai)\b/i,
+                /<!--\s*(?:ai|chatgpt|claude|codex|openai)[^>]*(?:generated|written|created)/i,
+              ].some((pattern) => pattern.test(body || ''));
+            }
+
+            function commitLooksAutomated(commit) {
+              return (
+                actorIsAutomated(commit.author) ||
+                actorIsAutomated(commit.committer) ||
+                identityTextLooksAutomated(
+                  commit.commit?.author?.name,
+                  commit.commit?.author?.email,
+                  commit.commit?.committer?.name,
+                  commit.commit?.committer?.email,
+                  commit.commit?.message
+                )
+              );
+            }
+
+            const { data: pullRequest } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: prNumber,
+            });
+            const body = pullRequest.body || '';
+            const edits = [];
+
+            try {
+              const result = await github.graphql(`
+                query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $number) {
+                      userContentEdits(first: 100) {
+                        nodes {
+                          editedAt
+                          editor {
+                            __typename
+                            login
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              `, { owner, repo, number: prNumber });
+
+              edits.push(...(result.repository.pullRequest.userContentEdits.nodes || []));
+            } catch (error) {
+              core.warning(`Could not inspect PR description edit history: ${error.message}`);
+            }
+
+            edits.sort((left, right) => new Date(right.editedAt) - new Date(left.editedAt));
+
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner,
+              repo,
+              pull_number: prNumber,
+              per_page: 100,
+            });
+            const automatedCommits = commits.filter(commitLooksAutomated);
+            const humanEdit = edits.find((edit) => actorIsHuman(edit.editor));
+            const latestNonWorkflowEdit = edits.find((edit) =>
+              edit.editor && !workflowLogins.has(normalizedLogin(edit.editor.login))
+            );
+            const pullRequestAuthor = pullRequest.user;
+            const automatedBranch = /^(?:ai|bot|chatgpt|claude|codex)[\/-]/i.test(pullRequest.head?.ref || '');
+            const explicitBodySignal = bodyLooksAutomated(body);
+            const workflowBodySignal = body.includes('<!-- simpleanalytics:changes-start -->');
+
+            let kind = 'human';
+            let reason = 'No reliable automation signal was found; preserving the description as human-authored.';
+
+            if (humanEdit) {
+              reason = `A human (${humanEdit.editor.login}) edited the description; human content takes precedence over every automation signal.`;
+            } else if (latestNonWorkflowEdit && actorIsAutomated(latestNonWorkflowEdit.editor)) {
+              kind = 'automated';
+              reason = `The latest substantive description editor is automated (${latestNonWorkflowEdit.editor.login}).`;
+            } else if (explicitBodySignal) {
+              kind = 'automated';
+              reason = 'The description contains an explicit AI-generation marker.';
+            } else if (actorIsHuman(pullRequestAuthor)) {
+              reason = `The pull request author is human (${pullRequestAuthor.login}) and no direct description signal indicates automation.`;
+            } else if (actorIsAutomated(pullRequestAuthor)) {
+              kind = 'automated';
+              reason = `The pull request author is automated (${pullRequestAuthor.login}).`;
+            } else if (commits.length > 0 && automatedCommits.length === commits.length) {
+              kind = 'automated';
+              reason = 'Every pull request commit has an automated author, committer, or AI attribution.';
+            } else if (automatedBranch && automatedCommits.length > 0) {
+              kind = 'automated';
+              reason = 'The agent branch name and commit attribution both indicate automation.';
+            } else if (workflowBodySignal && automatedCommits.length > 0) {
+              kind = 'automated';
+              reason = 'The workflow-managed description marker and commit attribution both indicate automation.';
+            }
+
+            core.setOutput('kind', kind);
+            core.setOutput('reason', reason);
+            core.setOutput('body_base64', Buffer.from(body, 'utf8').toString('base64'));
+            core.setOutput('captured_at', capturedAt);
+            core.info(`Classified the existing PR description as ${kind}: ${reason}`);
+
       - name: Run Claude PR review
         id: claude
         uses: anthropics/claude-code-action@v1
@@ -519,6 +669,8 @@ jobs:
             LAST REVIEW: ${{ steps.review_scope.outputs.last_review_note }}
             CROSS-REPO CONTEXT DIR: ${{ steps.checkout_context.outputs.context_dir }}
             EXISTING LINKED ISSUE: ${{ steps.existing_issue.outputs.ref }}
+            PR DESCRIPTION PROVENANCE: ${{ steps.description_provenance.outputs.kind }}
+            PR DESCRIPTION PROVENANCE REASON: ${{ steps.description_provenance.outputs.reason }}
 
             Review this pull request for security vulnerabilities, privacy risks, correctness bugs, data loss, runtime/deployment failures, and high-confidence regressions.
 
@@ -539,22 +691,39 @@ jobs:
 
             SDLC label rules:
             - Apply exactly one of these labels to PR #${{ github.event.pull_request.number }} using `gh issue edit`: `change: needs review` or `change: routine`.
-            - Use `change: needs review` when the PR affects customer data, user data, security, privacy, permissions, billing, infrastructure, production behavior, deployment safety, system stability, or critical system functionality.
-            - Use `change: routine` for internal tools or low-risk changes, such as design updates or content changes, that do not affect customer/user data, security, privacy, or critical functionality.
+            - Start with `change: routine`. Use `change: needs review` only when the full PR diff establishes at least one concrete, material impact listed below.
+            - Use `change: needs review` for a material change to:
+              - who can access customer, user, or sensitive data, or how that data is collected, exposed, shared, transferred, deleted, or retained;
+              - authentication, authorization, permissions, privacy controls, or security boundaries;
+              - prices, charges, invoices, subscriptions, or other billing behavior;
+              - database schemas, data migrations, or destructive or bulk data operations;
+              - production infrastructure, routing, certificates, secrets, deployment safety, or rollback behavior;
+              - concurrency, queues, storage, retries, or reliability where the diff creates a credible outage, data-loss, or corruption risk; or
+              - account or team deletion, data exports or transfers, or similarly critical system functionality.
+            - Use `change: routine` for all other changes, including ordinary product features and bug fixes, UI or display settings, copy or terminology, design, content, refactors, tests, documentation, developer tooling, and dependency maintenance that do not materially change one of the risks above.
+            - Routine examples include relabeling an existing analytics field without changing its collection or storage, and adding view display settings while preserving existing authorization and data-lifecycle boundaries.
+            - Needs-review examples include changing tenant or JWT authorization scope, account deletion behavior, bulk data migrations, billing calculations, or production certificate and routing behavior.
+            - Merely touching production code, changing user-visible behavior, or mentioning customers, users, data, security, or privacy is not enough to require review.
             - If INTERNAL APP is true and the PR does not touch customer/user data, security, privacy, or critical functionality, use `change: routine`.
-            - If uncertain, use `change: needs review`.
+            - If the evidence is uncertain or no concrete material impact can be named, use `change: routine`.
+            - Before choosing `change: needs review`, state the concrete material impact in the review summary or final comment.
             - Remove the label you did not choose if it is present.
 
             PR description rules:
             - If you choose `change: needs review`, update PR #${{ github.event.pull_request.number }} with the Simple Analytics PR template before finishing. Use `gh pr edit`.
-            - Preserve useful existing body content, but replace generic placeholders.
             - Read the current PR description and commit messages before updating the body.
-            - `Summary` must describe what changed and why in concrete terms. Keep manually written context concise; the workflow adds or refreshes a commit-message `Changes` list afterward.
+            - The workflow classified the existing body as `PR DESCRIPTION PROVENANCE`. Follow that classification even when the PR author, branch, or commits have different provenance.
+            - For a `human` description, treat every existing word as authoritative. Preserve its wording, order, headings, subheadings, images, attachment links, links, notes, and custom sections. Only add a missing required heading or minimally normalize the required `Security implications` and `Checklist` formats.
+            - For an `automated` description, treat the existing text as source material. Rewrite weak, generated, placeholder, or non-template text into the required template while retaining useful concrete facts.
+            - Never delete an existing Markdown image, HTML image, GitHub attachment, or media link, regardless of provenance.
+            - The required headings are `Summary`, `Security implications`, `Testing`, and `Checklist`. Additional human-written headings and subheadings are allowed and must remain untouched.
+            - `Summary` must describe what changed and why in concrete terms. Do not rewrite an existing human-written summary.
             - `Security implications` must be exactly one of these forms:
               - `No security impact`
               - `Has security impact - described as: <specific impact>`
             - Use `No security impact` only when you are confident the PR does not affect security, privacy, permissions, customer/user data, billing, infrastructure, production behavior, system stability, or critical functionality.
-            - `Testing` must include commands/checks you personally ran during this workflow and their result. If you did not run validation, write `Not run by Claude.` and preserve any useful existing testing notes.
+            - Preserve human-written testing notes word for word. For an automated description, `Testing` must include commands/checks you personally ran during this workflow and their result. If you did not run validation, write `Not run by Claude.`.
+            - `Checklist` may contain only these workflow-created items: `Linked to an issue`, `Tested`, and `Asked for a review`. Never invent or append another checklist item. Preserve extra checklist items only when they were already present in a human-written description.
             - If EXISTING LINKED ISSUE is non-empty, preserve exactly one `Closes EXISTING LINKED ISSUE` line. Otherwise, do not add a `Closes ...` reference; the workflow adds one after creating the issue.
 
             Issue description rules:
@@ -738,10 +907,10 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: issueNumber,
-                labels: [needsReview],
+                labels: [routine],
               });
-              finalLabel = needsReview;
-              core.warning(`No SDLC label was present after Claude review. Added '${needsReview}'.`);
+              finalLabel = routine;
+              core.warning(`No SDLC label was present after Claude review. Added default '${routine}'.`);
             }
 
             core.setOutput('label', finalLabel);
@@ -753,6 +922,9 @@ jobs:
         env:
           EXISTING_ISSUE_REF: ${{ steps.existing_issue.outputs.ref }}
           CLAUDE_ISSUE_DRAFT: ${{ steps.claude.outputs.structured_output }}
+          DESCRIPTION_PROVENANCE: ${{ steps.description_provenance.outputs.kind }}
+          ORIGINAL_PR_BODY_BASE64: ${{ steps.description_provenance.outputs.body_base64 }}
+          DESCRIPTION_CAPTURED_AT: ${{ steps.description_provenance.outputs.captured_at }}
         with:
           script: |
             const needsReview = 'change: needs review';
@@ -825,11 +997,168 @@ jobs:
               return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             }
 
+            function findSection(body, title) {
+              const headings = [...String(body || '').matchAll(/^##\s+(.+?)\s*$/gm)];
+              const index = headings.findIndex((heading) => heading[1].trim().toLowerCase() === title.toLowerCase());
+              if (index === -1) return null;
+
+              const heading = headings[index];
+              const headingStart = heading.index;
+              const headingEnd = headingStart + heading[0].length;
+              let contentStart = headingEnd;
+
+              if (body.slice(contentStart, contentStart + 2) === '\r\n') contentStart += 2;
+              else if (body[contentStart] === '\n') contentStart += 1;
+
+              return {
+                headingStart,
+                contentStart,
+                sectionEnd: headings[index + 1]?.index ?? body.length,
+              };
+            }
+
             function extractSection(body, title) {
-              const escapedTitle = escapeRegExp(title);
-              const expression = new RegExp(`(?:^|\\n)##\\s+${escapedTitle}\\s*\\n([\\s\\S]*?)(?=\\n##\\s+|$)`, 'i');
-              const match = expression.exec(body || '');
-              return match ? match[1].trim() : '';
+              const section = findSection(body, title);
+              return section ? body.slice(section.contentStart, section.sectionEnd).trim() : '';
+            }
+
+            function setSection(body, title, content) {
+              const rendered = `## ${title}\n\n${String(content || '').trim()}`;
+              const section = findSection(body, title);
+
+              if (!section) {
+                return [String(body || '').trimEnd(), rendered].filter(Boolean).join('\n\n').concat('\n');
+              }
+
+              const before = body.slice(0, section.headingStart);
+              const after = body.slice(section.sectionEnd);
+              return `${before}${rendered}${after ? `\n\n${after}` : '\n'}`;
+            }
+
+            function ensureSummary(body, fallback) {
+              if (findSection(body, 'Summary')) return body;
+
+              const value = String(body || '');
+              const firstHeading = /^##\s+/m.exec(value);
+
+              if (firstHeading?.index > 0 && value.slice(0, firstHeading.index).trim()) {
+                return `## Summary\n\n${value.slice(0, firstHeading.index).trimEnd()}\n\n${value.slice(firstHeading.index)}`;
+              }
+
+              if (!firstHeading && value.trim()) return `## Summary\n\n${value.trim()}\n`;
+              return `## Summary\n\n${fallback}\n\n${value.trimStart()}`.trimEnd().concat('\n');
+            }
+
+            function normalizeChecklist(value, states, preserveExistingExtras) {
+              const required = [
+                { label: 'Linked to an issue', checked: states.linkedIssue },
+                { label: 'Tested', checked: states.tested },
+                { label: 'Asked for a review', checked: states.askedForReview },
+              ];
+              const requiredByLabel = new Map(required.map((item) => [item.label.toLowerCase(), item]));
+              const seen = new Set();
+              const lines = preserveExistingExtras ? String(value || '').split(/\r?\n/) : [];
+              const output = [];
+
+              for (const line of lines) {
+                const item = line.trim().match(/^-\s*\[[ xX]\]\s*(Linked to an issue|Tested|Asked for a review)\s*\.?$/i);
+                if (!item) {
+                  output.push(line);
+                  continue;
+                }
+
+                const key = item[1].toLowerCase();
+                if (seen.has(key)) continue;
+                const requiredItem = requiredByLabel.get(key);
+                output.push(`- [${requiredItem.checked ? 'x' : ' '}] ${requiredItem.label}`);
+                seen.add(key);
+              }
+
+              for (const item of required) {
+                const key = item.label.toLowerCase();
+                if (!seen.has(key)) output.push(`- [${item.checked ? 'x' : ' '}] ${item.label}`);
+              }
+
+              return output.join('\n').trim();
+            }
+
+            function protectedMediaTokens(value) {
+              const patterns = [
+                /<picture\b[\s\S]*?<\/picture>/gi,
+                /<img\b[^>]*>/gi,
+                /!\[[^\]\n]*\]\(\s*(?:<[^>\n]+>|[^)\n]+)\s*\)/g,
+                /!\[[^\]\n]*\]\[[^\]\n]*\]/g,
+                /^\s*\[[^\]\n]+\]:\s+(?:<[^>\n]+>|\S+).*$/gm,
+                /https:\/\/github\.com\/user-attachments\/assets\/[A-Za-z0-9-]+/g,
+              ];
+              const tokens = [];
+
+              for (const pattern of patterns) {
+                for (const match of String(value || '').matchAll(pattern)) tokens.push(match[0].trim());
+              }
+
+              return [...new Set(tokens.filter(Boolean))];
+            }
+
+            function mediaIdentity(token) {
+              const markdown = token.match(/!\[[^\]]*\]\(\s*<?([^>\s)]+)>?/);
+              if (markdown?.[1]) return markdown[1];
+              const html = token.match(/\bsrc=["']([^"']+)["']/i);
+              if (html?.[1]) return html[1];
+              const attachment = token.match(/https:\/\/github\.com\/user-attachments\/assets\/[A-Za-z0-9-]+/);
+              return attachment?.[0] || token;
+            }
+
+            function preserveProtectedMedia(originalBody, body) {
+              const existing = new Set(protectedMediaTokens(body).map(mediaIdentity));
+              const missing = [];
+
+              for (const token of protectedMediaTokens(originalBody)) {
+                const identity = mediaIdentity(token);
+                if (existing.has(identity)) continue;
+                existing.add(identity);
+                missing.push(token);
+              }
+
+              if (!missing.length) return body;
+
+              const screenshots = extractSection(body, 'Screenshots');
+              return setSection(body, 'Screenshots', [screenshots, ...missing].filter(Boolean).join('\n\n'));
+            }
+
+            async function latestDescriptionEditIsHumanSinceCapture() {
+              const capturedAt = Date.parse(process.env.DESCRIPTION_CAPTURED_AT || '');
+              if (!Number.isFinite(capturedAt)) return false;
+
+              try {
+                const result = await github.graphql(`
+                  query($owner: String!, $repo: String!, $number: Int!) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        userContentEdits(last: 100) {
+                          nodes {
+                            editedAt
+                            editor {
+                              __typename
+                              login
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                `, { owner, repo, number: prNumber });
+                const latestEdit = (result.repository.pullRequest.userContentEdits.nodes || [])
+                  .filter((edit) => Date.parse(edit.editedAt) > capturedAt)
+                  .sort((left, right) => new Date(right.editedAt) - new Date(left.editedAt))[0];
+                const login = String(latestEdit?.editor?.login || '').toLowerCase();
+                const automatedLogin = /(?:^|[-_])(ai|bot|chatgpt|claude|codex|openai)(?:$|[-_\[])/i.test(login);
+
+                return latestEdit?.editor?.__typename === 'User' && !automatedLogin;
+              } catch (error) {
+                core.warning(`Could not check for a newer human PR description edit: ${error.message}`);
+                return false;
+              }
             }
 
             function checked(existingChecklist, label) {
@@ -981,7 +1310,7 @@ jobs:
 
               const impact = raw.match(/^Has security impact - described as:\s*([\s\S]+)$/i);
               if (impact?.[1]?.trim()) {
-                return `Has security impact - described as: ${impact[1].trim()}`;
+                return `Has security impact - described as: ${compactWhitespace(impact[1])}`;
               }
 
               const withoutCheckboxes = raw.replace(/^-\s*\[[ xX]\]\s*/gm, '').trim();
@@ -992,7 +1321,7 @@ jobs:
               );
               if (isPlaceholder) return fallbackSecurityImplications();
 
-              return `Has security impact - described as: ${raw}`;
+              return `Has security impact - described as: ${compactWhitespace(raw)}`;
             }
 
             function normalizeTesting(value) {
@@ -1070,21 +1399,19 @@ jobs:
             }
 
             const currentBody = pullRequest.body || '';
-            const existingSummary = extractSection(currentBody, 'Summary');
-            const existingSecurity = extractSection(currentBody, 'Security implications');
-            const existingTesting = extractSection(currentBody, 'Testing');
-            const existingChecklist = extractSection(currentBody, 'Checklist');
-            const manualSummary = cleanSummaryText(existingSummary);
-            const fallbackSummary = manualSummary ? '' : await buildFallbackSummary();
-            const commitChangeSummary = await buildCommitChangeSummary();
-            const summary = [
-              manualSummary || fallbackSummary,
-              commitChangeSummary,
-            ].filter(Boolean).join('\n\n').trim();
+            const originalBody = Buffer.from(process.env.ORIGINAL_PR_BODY_BASE64 || '', 'base64').toString('utf8');
+            const humanDescription = process.env.DESCRIPTION_PROVENANCE === 'human';
+            const newerHumanDescription = (
+              humanDescription &&
+              currentBody !== originalBody &&
+              await latestDescriptionEditIsHumanSinceCapture()
+            );
+            const sourceBody = humanDescription && !newerHumanDescription ? originalBody : currentBody;
             const existingIssueRef = (process.env.EXISTING_ISSUE_REF || '').trim();
             const linkedIssues = uniqueRefs([
               ...(existingIssueRef ? [{ ref: existingIssueRef, url: '' }] : []),
               ...(await closingIssueRefsFromGraphql()),
+              ...closingIssueRefsFromBody(sourceBody),
               ...closingIssueRefsFromBody(currentBody),
             ]);
 
@@ -1143,35 +1470,72 @@ jobs:
               }
             }
 
-            const security = normalizeSecurityImplications(existingSecurity);
-            const testing = normalizeTesting(existingTesting);
-            const tested = checked(existingChecklist, 'Tested') || testingWasFilled(testing) ? 'x' : ' ';
-            const askedForReview = checked(existingChecklist, 'Asked for a review') ? 'x' : ' ';
-            const closingLine = issueRef ? `Closes ${issueRef}` : 'No linked issue was created automatically.';
-            const linkedIssueCheck = issueRef ? 'x' : ' ';
+            let nextBody;
 
-            const nextBody = [
-              '## Summary',
-              '',
-              closingLine,
-              '',
-              summary,
-              '',
-              '## Security implications',
-              '',
-              security,
-              '',
-              '## Testing',
-              '',
-              testing,
-              '',
-              '## Checklist',
-              '',
-              `- [${linkedIssueCheck}] Linked to an issue`,
-              `- [${tested}] Tested`,
-              `- [${askedForReview}] Asked for a review`,
-              '',
-            ].join('\n');
+            if (humanDescription) {
+              nextBody = ensureSummary(sourceBody, pullRequest.title);
+
+              if (issueRef && !closingIssueRefsFromBody(nextBody).length) {
+                const summary = extractSection(nextBody, 'Summary');
+                nextBody = setSection(nextBody, 'Summary', [`Closes ${issueRef}`, summary].filter(Boolean).join('\n\n'));
+              }
+
+              const security = normalizeSecurityImplications(extractSection(nextBody, 'Security implications'));
+              const testing = normalizeTesting(extractSection(nextBody, 'Testing'));
+              const existingChecklist = extractSection(nextBody, 'Checklist');
+              const checklist = normalizeChecklist(existingChecklist, {
+                linkedIssue: Boolean(issueRef),
+                tested: checked(existingChecklist, 'Tested') || testingWasFilled(testing),
+                askedForReview: checked(existingChecklist, 'Asked for a review'),
+              }, true);
+
+              nextBody = setSection(nextBody, 'Security implications', security);
+              nextBody = setSection(nextBody, 'Testing', testing);
+              nextBody = setSection(nextBody, 'Checklist', checklist);
+            } else {
+              const existingSummary = extractSection(sourceBody, 'Summary');
+              const existingSecurity = extractSection(sourceBody, 'Security implications');
+              const existingTesting = extractSection(sourceBody, 'Testing');
+              const existingChecklist = extractSection(sourceBody, 'Checklist');
+              const manualSummary = cleanSummaryText(existingSummary);
+              const fallbackSummary = manualSummary ? '' : await buildFallbackSummary();
+              const commitChangeSummary = await buildCommitChangeSummary();
+              const summary = [
+                manualSummary || fallbackSummary,
+                commitChangeSummary,
+              ].filter(Boolean).join('\n\n').trim();
+              const security = normalizeSecurityImplications(existingSecurity);
+              const testing = normalizeTesting(existingTesting);
+              const closingLine = issueRef ? `Closes ${issueRef}` : 'No linked issue was created automatically.';
+              const checklist = normalizeChecklist('', {
+                linkedIssue: Boolean(issueRef),
+                tested: checked(existingChecklist, 'Tested') || testingWasFilled(testing),
+                askedForReview: checked(existingChecklist, 'Asked for a review'),
+              }, false);
+
+              nextBody = [
+                '## Summary',
+                '',
+                closingLine,
+                '',
+                summary,
+                '',
+                '## Security implications',
+                '',
+                security,
+                '',
+                '## Testing',
+                '',
+                testing,
+                '',
+                '## Checklist',
+                '',
+                checklist,
+                '',
+              ].join('\n');
+            }
+
+            nextBody = preserveProtectedMedia(originalBody, nextBody);
 
             if (nextBody.trim() !== currentBody.trim()) {
               await github.rest.pulls.update({
@@ -1180,7 +1544,7 @@ jobs:
                 pull_number: prNumber,
                 body: nextBody,
               });
-              core.info(`Updated PR body with the Simple Analytics PR template and issue reference ${issueRef}.`);
+              core.info(`Updated ${humanDescription ? 'human-authored' : 'automated'} PR body with required template sections and issue reference ${issueRef}.`);
             } else {
               core.info('PR body already matches the Simple Analytics PR template.');
             }
