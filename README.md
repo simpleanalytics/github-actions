@@ -23,8 +23,10 @@ jobs:
 
 Claude reviews full PR diffs on `opened` and `reopened`, and only the newly pushed commit range on `synchronize` unless a critical issue is still present. The workflow creates and applies exactly one SDLC label:
 
-- `change: needs review` for changes affecting security, data protection, system stability, customer/user data, or critical functionality.
-- `change: routine` for internal tools or low-risk changes such as design updates or content modifications.
+- `change: routine` is the default for ordinary product work, bug fixes, UI and display changes, copy, design, refactors, tests, documentation, tooling, and dependency maintenance.
+- `change: needs review` is reserved for a concrete material change to sensitive-data handling or access, authentication or authorization, privacy or security boundaries, billing, database migrations or destructive data operations, production infrastructure or deployment safety, credible outage or data-loss risks, or similarly critical functionality.
+
+Uncertainty does not escalate a pull request by itself: when Claude cannot name a concrete material impact, or when it fails to apply either label, the workflow uses `change: routine`. If both labels are present, the explicit `change: needs review` classification wins.
 
 For `change: needs review`, the workflow ensures the required `Summary`, `Security implications`, `Testing`, and `Checklist` sections exist. Human-authored descriptions remain authoritative: their wording, extra sections, and images are preserved while missing required sections are added. Bot- or AI-authored descriptions may be normalized from their existing content. Images and attachments are preserved in either case, and automation never creates checklist items beyond `Linked to an issue`, `Tested`, and `Asked for a review`.
 

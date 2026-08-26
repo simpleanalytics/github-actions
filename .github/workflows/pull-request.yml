@@ -691,10 +691,22 @@ jobs:
 
             SDLC label rules:
             - Apply exactly one of these labels to PR #${{ github.event.pull_request.number }} using `gh issue edit`: `change: needs review` or `change: routine`.
-            - Use `change: needs review` when the PR affects customer data, user data, security, privacy, permissions, billing, infrastructure, production behavior, deployment safety, system stability, or critical system functionality.
-            - Use `change: routine` for internal tools or low-risk changes, such as design updates or content changes, that do not affect customer/user data, security, privacy, or critical functionality.
+            - Start with `change: routine`. Use `change: needs review` only when the full PR diff establishes at least one concrete, material impact listed below.
+            - Use `change: needs review` for a material change to:
+              - who can access customer, user, or sensitive data, or how that data is collected, exposed, shared, transferred, deleted, or retained;
+              - authentication, authorization, permissions, privacy controls, or security boundaries;
+              - prices, charges, invoices, subscriptions, or other billing behavior;
+              - database schemas, data migrations, or destructive or bulk data operations;
+              - production infrastructure, routing, certificates, secrets, deployment safety, or rollback behavior;
+              - concurrency, queues, storage, retries, or reliability where the diff creates a credible outage, data-loss, or corruption risk; or
+              - account or team deletion, data exports or transfers, or similarly critical system functionality.
+            - Use `change: routine` for all other changes, including ordinary product features and bug fixes, UI or display settings, copy or terminology, design, content, refactors, tests, documentation, developer tooling, and dependency maintenance that do not materially change one of the risks above.
+            - Routine examples include relabeling an existing analytics field without changing its collection or storage, and adding view display settings while preserving existing authorization and data-lifecycle boundaries.
+            - Needs-review examples include changing tenant or JWT authorization scope, account deletion behavior, bulk data migrations, billing calculations, or production certificate and routing behavior.
+            - Merely touching production code, changing user-visible behavior, or mentioning customers, users, data, security, or privacy is not enough to require review.
             - If INTERNAL APP is true and the PR does not touch customer/user data, security, privacy, or critical functionality, use `change: routine`.
-            - If uncertain, use `change: needs review`.
+            - If the evidence is uncertain or no concrete material impact can be named, use `change: routine`.
+            - Before choosing `change: needs review`, state the concrete material impact in the review summary or final comment.
             - Remove the label you did not choose if it is present.
 
             PR description rules:
@@ -895,10 +907,10 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: issueNumber,
-                labels: [needsReview],
+                labels: [routine],
               });
-              finalLabel = needsReview;
-              core.warning(`No SDLC label was present after Claude review. Added '${needsReview}'.`);
+              finalLabel = routine;
+              core.warning(`No SDLC label was present after Claude review. Added default '${routine}'.`);
             }
 
             core.setOutput('label', finalLabel);
