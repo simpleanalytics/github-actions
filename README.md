@@ -23,6 +23,8 @@ jobs:
 
 Claude reviews full PR diffs on `opened` and `reopened`, and only the newly pushed commit range on `synchronize` unless a critical issue is still present. The workflow creates and applies exactly one SDLC label:
 
+Review findings prefer concise inline comments. Small fixes use complete GitHub suggested changes; fixes needing more than three small replacements use a `Fix this` link that asks Claude Code to create a separate branch from the current PR head and return its link without opening another pull request. When needed, one top-level comment contains only findings that cannot be anchored to changed lines, the selected SDLC label, and copy-paste-ready documentation updates; clean reviews do not add a comment.
+
 - `change: routine` is the default for ordinary product work, bug fixes, UI and display changes, copy, design, refactors, tests, documentation, tooling, and dependency maintenance.
 - `change: needs review` is reserved for a concrete material change to sensitive-data handling or access, authentication or authorization, privacy or security boundaries, billing, database migrations or destructive data operations, production infrastructure or deployment safety, credible outage or data-loss risks, or similarly critical functionality.
 
@@ -36,7 +38,7 @@ The workflow first tries to create the issue in `simpleanalytics/dashboard`; if 
 
 Set `internal_app: true` for internal apps where low-risk changes that do not touch customer/user data, security, privacy, or critical functionality should stay `change: routine` and skip approval-oriented enforcement.
 
-The workflow defaults to `claude-opus-4-8`. It can clone read-only cross-repo context when the caller has a `SA_PAT_ADRIAAN_READ_REPOS` secret. If the secret is missing, the workflow continues with a warning; the token is stored in 1Password under that name. Context repositories clone in parallel with `context_clone_concurrency`, which defaults to `8`.
+The workflow defaults to `claude-opus-5`. It can clone read-only cross-repo context when the caller has a `SA_PAT_ADRIAAN_READ_REPOS` secret. If the secret is missing, the workflow continues with a warning; the token is stored in 1Password under that name. Context repositories clone in parallel with `context_clone_concurrency`, which defaults to `8`.
 
 ## Manual Claude requests
 
