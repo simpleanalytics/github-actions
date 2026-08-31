@@ -134,7 +134,6 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
-          persist-credentials: false
 
       - name: Fetch base branch
         env:
@@ -686,9 +685,24 @@ jobs:
 
             Documentation review rules:
             - When the pull request changes a user-facing feature, workflow, setting, integration, API, or other documented behavior, inspect the read-only documentation repository at `${{ steps.checkout_context.outputs.context_dir }}/simpleanalytics/docs`.
-            - If documentation is missing or outdated, always add one top-level `Documentation update` comment, never an inline comment. Combine every required docs change in that comment.
-            - For each file, link `https://github.com/simpleanalytics/docs/blob/master/<path>`, name where to insert or replace text, and include copy-paste-ready Markdown in a fenced block.
+            - If documentation is missing or outdated, add exactly one top-level PR comment using the template below.
+            - Replace every placeholder and do not add text before or after the template.
+            - Repeat the file block when multiple documentation files need changes.
+            - Do not post documentation feedback inline or repeat it elsewhere.
             - Do not edit the documentation repository or request docs changes for internal-only behavior.
+
+            Documentation comment template:
+            ## Documentation update
+
+            ### [`<docs-file-path>`](https://github.com/simpleanalytics/docs/blob/master/<docs-file-path>)
+
+            **Location:** `<heading or exact place where the text belongs>`
+
+            Copy and paste this into the documentation repository:
+
+            ```md
+            <complete, ready-to-paste documentation text>
+            ```
 
             SDLC label rules:
             - Apply exactly one of these labels to PR #${{ github.event.pull_request.number }} using `gh issue edit`: `change: needs review` or `change: routine`.
