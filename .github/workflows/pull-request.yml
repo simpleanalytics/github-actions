@@ -77,11 +77,10 @@ jobs:
       group: claude-pr-review-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: false
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
       issues: write
       actions: read
-      id-token: write
     steps:
       - name: Ensure SDLC labels
         uses: actions/github-script@v9
@@ -135,6 +134,7 @@ jobs:
           repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Fetch base branch
         env:
@@ -651,8 +651,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
           track_progress: false
-          use_sticky_comment: true
+          use_sticky_comment: false
           include_fix_links: true
           allowed_bots: ${{ inputs.claude_allowed_bots }}
           additional_permissions: |
@@ -685,9 +686,9 @@ jobs:
 
             Documentation review rules:
             - When the pull request changes a user-facing feature, workflow, setting, integration, API, or other documented behavior, inspect the read-only documentation repository at `${{ steps.checkout_context.outputs.context_dir }}/simpleanalytics/docs`.
-            - Check whether the existing documentation accurately covers the new behavior, including any changed instructions, limitations, examples, or screenshots.
-            - If documentation is missing or outdated, leave a concise actionable suggestion in the PR review. Name the relevant documentation file or section when possible and describe what should be added or changed.
-            - Do not edit the documentation repository from this workflow. Do not request documentation changes for internal-only changes or changes that do not affect documented user behavior.
+            - If documentation is missing or outdated, always add one top-level `Documentation update` comment, never an inline comment. Combine every required docs change in that comment.
+            - For each file, link `https://github.com/simpleanalytics/docs/blob/master/<path>`, name where to insert or replace text, and include copy-paste-ready Markdown in a fenced block.
+            - Do not edit the documentation repository or request docs changes for internal-only behavior.
 
             SDLC label rules:
             - Apply exactly one of these labels to PR #${{ github.event.pull_request.number }} using `gh issue edit`: `change: needs review` or `change: routine`.
@@ -706,7 +707,7 @@ jobs:
             - Merely touching production code, changing user-visible behavior, or mentioning customers, users, data, security, or privacy is not enough to require review.
             - If INTERNAL APP is true and the PR does not touch customer/user data, security, privacy, or critical functionality, use `change: routine`.
             - If the evidence is uncertain or no concrete material impact can be named, use `change: routine`.
-            - Before choosing `change: needs review`, state the concrete material impact in the review summary or final comment.
+            - Before choosing `change: needs review`, state the concrete material impact in a finding or top-level comment.
             - Remove the label you did not choose if it is present.
 
             PR description rules:
@@ -735,20 +736,17 @@ jobs:
             - Do not include Markdown section headings in the structured fields and do not prefix suggested-change entries with bullets; the workflow adds the issue formatting.
             - If you choose `change: routine` or EXISTING LINKED ISSUE is non-empty, return empty strings and an empty array for the issue draft fields.
 
-            Noise control:
-            - Ignore style, naming, formatting, minor refactors, low-confidence concerns, and preference-only feedback.
-            - Summarize minor observations in at most two sentences, only if useful.
-            - Prefer no comment over a speculative comment.
-            - Report at most three findings unless there is a critical security or data-loss risk.
-
-            Fix behavior:
-            - If a fix is small, obvious, and low-risk, apply it directly to the PR branch and explain the change briefly.
-            - If a fix needs maintainer judgment, leave a concise finding with impact and the exact suggested fix.
-            - When possible, use Claude Code Action fix links or GitHub suggested changes so a maintainer can apply the fix later.
-
-            Output:
-            - If there are no actionable issues and you did not change files, leave one short comment saying the checked scope is OK and include the SDLC label you chose.
-            - If you changed files, keep the comment short and list the fix plus any validation you ran.
+            Review comments and fixes:
+            - Report actionable bugs, security or privacy risks, edge cases, regressions, maintainability issues, and useful nitpicks. Ignore formatter/linter output, preference-only feedback, and low-confidence concerns.
+            - Verify findings by tracing relevant code and callers and, when practical, with a focused test or temporary local patch. Leave the working tree unchanged.
+            - Keep each finding's prose to one or two sentences: the concrete impact and smallest fix. Assume an experienced developer and group repeated instances.
+            - Prefer an inline comment on the narrowest relevant changed lines. Use at most one top-level PR comment, only for unanchorable findings or the documentation update; include the selected SDLC label there when present.
+            - Check existing Claude comments first. Never repeat an unchanged finding or documentation update, or summarize inline findings in the top-level comment.
+            - Do not add generic praise, long summaries, or explanations of basic concepts.
+            - For fixes that fit in at most three small replacements, add complete GitHub `suggestion` blocks instead of changing the branch.
+            - For a larger fix, leave one concise finding for the built-in `Fix this` link and include: `Create a separate branch from the current PR head, commit and push only that branch, and return its link so it can be merged into the current PR branch. Do not open a pull request.`
+            - Do not create branches, commits, or pull requests during this review workflow.
+            - If there are no findings, do not post a review comment; the workflow check and label are enough.
             - If validation fails or you cannot safely validate, say that plainly without long reasoning.
             - Do not create tracking issues. The workflow handles linked issue creation and final checklist enforcement after labels are finalized.
             - Your final response must satisfy the configured JSON schema. Use it only for the separate issue draft fields; continue to post review findings through the normal GitHub review tools.
@@ -757,7 +755,7 @@ jobs:
             ${{ inputs.claude_extra_prompt }}
           claude_args: |
             --model ${{ inputs.claude_model }}
-            --allowedTools "Agent,AskUserQuestion,Bash,Glob,Grep,LS,Read,Edit,MultiEdit,Write,NotebookRead,NotebookEdit,TodoRead,TodoWrite,Skill,WebFetch,WebSearch,mcp__github__*,mcp__github_comment__*,mcp__github_file_ops__*,mcp__github_inline_comment__*,mcp__github_ci__*"
+            --allowedTools "Agent,AskUserQuestion,Bash,Glob,Grep,LS,Read,Edit,MultiEdit,Write,NotebookRead,NotebookEdit,TodoRead,TodoWrite,Skill,WebFetch,WebSearch,mcp__github__*,mcp__github_inline_comment__*,mcp__github_ci__*"
             --json-schema '{"type":"object","properties":{"issue_title":{"type":"string"},"issue_problem":{"type":"string"},"issue_suggested_changes":{"type":"array","items":{"type":"string"}}},"required":["issue_title","issue_problem","issue_suggested_changes"],"additionalProperties":false}'
 
       - name: Resolve reviewed HEAD
