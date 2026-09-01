@@ -142,6 +142,40 @@ jobs:
           git remote add base "https://github.com/${{ github.repository }}.git" 2>/dev/null || git remote set-url base "https://github.com/${{ github.repository }}.git"
           git fetch --no-tags --prune --depth=200 base "$BASE_REF"
 
+      - name: Index current pull request patches
+        id: current_patches
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          merge_base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          patch_index="$RUNNER_TEMP/current-pr-patches.tsv"
+          : > "$patch_index"
+
+          while read -r commit_sha; do
+            parent_sha="$(git rev-parse "$commit_sha^" 2>/dev/null || true)"
+            [[ -n "$parent_sha" ]] || continue
+
+            patch_id="$(
+              git diff --binary "$parent_sha" "$commit_sha" |
+                git patch-id --stable |
+                awk 'NR == 1 { print $1 }'
+            )"
+
+            if [[ "$patch_id" =~ ^[a-f0-9]{40}$ ]]; then
+              printf '%s\t%s\n' "$patch_id" "$commit_sha" >> "$patch_index"
+            fi
+          done < <(git rev-list --reverse "$merge_base..$HEAD_SHA" | tail -n 500)
+
+          patches_json="$(jq -Rn '[inputs | split("\t") | {patch_id: .[0], commit_sha: .[1]}]' < "$patch_index")"
+
+          {
+            echo "merge_base=$merge_base"
+            echo "patches_json<<EOF"
+            echo "$patches_json"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Find previous Claude review checkpoint
         id: previous_review
         uses: actions/github-script@v9
@@ -175,7 +209,7 @@ jobs:
                   const checkpoint = JSON.parse(match[1].trim());
 
                   if (
-                    checkpoint.version === 1 &&
+                    [1, 2].includes(checkpoint.version) &&
                     checkpoint.repository === nameWithOwner &&
                     Number(checkpoint.pull_request) === Number(issueNumber) &&
                     /^[a-f0-9]{40}$/i.test(checkpoint.head_sha || '')
@@ -225,6 +259,192 @@ jobs:
             core.setOutput('source', '');
             core.info('No previous Claude review checkpoint found.');
 
+      - name: Find reviewed patches in related pull requests
+        id: related_reviews
+        uses: actions/github-script@v9
+        env:
+          CURRENT_PATCHES_JSON: ${{ steps.current_patches.outputs.patches_json }}
+          CURRENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          LOOKUP_TIMEOUT_MS: 30000
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const nameWithOwner = `${owner}/${repo}`;
+            const currentPrNumber = Number(process.env.CURRENT_PR_NUMBER);
+            const timeoutMs = Number(process.env.LOOKUP_TIMEOUT_MS || 30000);
+            const trustedBotLogins = new Set(['github-actions', 'github-actions[bot]']);
+            const markerPattern = /<!--\s*simpleanalytics-claude-pr-review-checkpoint\s+([\s\S]*?)\s*-->/g;
+            const shaPattern = /^[a-f0-9]{40}$/i;
+
+            function emptyResult(reason) {
+              core.setOutput('reviewed_commit_shas', '[]');
+              core.setOutput('source_pull_requests', '[]');
+              core.setOutput('legacy_checkpoints', '[]');
+              core.setOutput('matched_patch_count', '0');
+              if (reason) core.warning(reason);
+            }
+
+            let currentPatches;
+            try {
+              currentPatches = JSON.parse(process.env.CURRENT_PATCHES_JSON || '[]');
+            } catch (error) {
+              emptyResult(`Could not parse the current patch index: ${error.message}`);
+              return;
+            }
+
+            const currentPatchCommits = new Map();
+            for (const entry of currentPatches) {
+              if (!shaPattern.test(entry.patch_id || '') || !shaPattern.test(entry.commit_sha || '')) continue;
+              const patchId = entry.patch_id.toLowerCase();
+              const commits = currentPatchCommits.get(patchId) || [];
+              commits.push(entry.commit_sha.toLowerCase());
+              currentPatchCommits.set(patchId, commits);
+            }
+
+            if (!currentPatchCommits.size) {
+              emptyResult('The current pull request has no patch IDs to compare.');
+              return;
+            }
+
+            const query = `
+              query RelatedReviewCheckpoints($owner: String!, $repo: String!) {
+                repository(owner: $owner, name: $repo) {
+                  openPullRequests: pullRequests(
+                    states: OPEN
+                    first: 50
+                    orderBy: { field: UPDATED_AT, direction: DESC }
+                  ) {
+                    nodes {
+                      number
+                      firstComments: comments(first: 20) {
+                        nodes { id author { login } body updatedAt }
+                      }
+                      lastComments: comments(last: 20) {
+                        nodes { id author { login } body updatedAt }
+                      }
+                    }
+                  }
+                  mergedPullRequests: pullRequests(
+                    states: MERGED
+                    first: 20
+                    orderBy: { field: UPDATED_AT, direction: DESC }
+                  ) {
+                    nodes {
+                      number
+                      mergedAt
+                      firstComments: comments(first: 20) {
+                        nodes { id author { login } body updatedAt }
+                      }
+                      lastComments: comments(last: 20) {
+                        nodes { id author { login } body updatedAt }
+                      }
+                    }
+                  }
+                }
+              }
+            `;
+
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+            let result;
+            try {
+              const response = await github.request('POST /graphql', {
+                query,
+                variables: { owner, repo },
+                request: { signal: controller.signal },
+              });
+              if (response.data.errors?.length) {
+                throw new Error(response.data.errors.map((error) => error.message).join('; '));
+              }
+              result = response.data.data;
+            } catch (error) {
+              emptyResult(`Cross-PR checkpoint lookup failed; reviewing normally: ${error.message}`);
+              return;
+            } finally {
+              clearTimeout(timeoutId);
+            }
+
+            const mergedCutoff = Date.now() - (14 * 24 * 60 * 60 * 1000);
+            const candidates = [
+              ...(result.repository.openPullRequests.nodes || []),
+              ...(result.repository.mergedPullRequests.nodes || []).filter(
+                (pullRequest) => Date.parse(pullRequest.mergedAt || 0) >= mergedCutoff,
+              ),
+            ].filter((pullRequest) => Number(pullRequest.number) !== currentPrNumber);
+
+            const reviewedCommitShas = new Set();
+            const sourcePullRequests = new Set();
+            const legacyCheckpoints = [];
+
+            for (const pullRequest of candidates) {
+              const commentsById = new Map();
+              for (const comment of [
+                ...(pullRequest.firstComments?.nodes || []),
+                ...(pullRequest.lastComments?.nodes || []),
+              ]) {
+                commentsById.set(comment.id, comment);
+              }
+
+              const checkpoints = [];
+              for (const comment of commentsById.values()) {
+                if (!trustedBotLogins.has(comment.author?.login)) continue;
+
+                markerPattern.lastIndex = 0;
+                let match;
+                while ((match = markerPattern.exec(comment.body || '')) !== null) {
+                  try {
+                    const checkpoint = JSON.parse(match[1].trim());
+                    if (
+                      [1, 2].includes(checkpoint.version) &&
+                      checkpoint.repository === nameWithOwner &&
+                      Number(checkpoint.pull_request) === Number(pullRequest.number) &&
+                      shaPattern.test(checkpoint.base_sha || '') &&
+                      shaPattern.test(checkpoint.head_sha || '')
+                    ) {
+                      checkpoints.push(checkpoint);
+                    }
+                  } catch (error) {
+                    core.warning(`Ignoring invalid cross-PR checkpoint in comment ${comment.id}: ${error.message}`);
+                  }
+                }
+              }
+
+              checkpoints.sort(
+                (left, right) => Date.parse(right.reviewed_at || 0) - Date.parse(left.reviewed_at || 0),
+              );
+              const checkpoint = checkpoints[0];
+              if (!checkpoint) continue;
+
+              if (checkpoint.version === 1) {
+                legacyCheckpoints.push({
+                  base_sha: checkpoint.base_sha.toLowerCase(),
+                  head_sha: checkpoint.head_sha.toLowerCase(),
+                  pull_request: Number(pullRequest.number),
+                });
+                continue;
+              }
+
+              if (!Array.isArray(checkpoint.reviewed_patch_ids)) continue;
+              for (const patchId of checkpoint.reviewed_patch_ids) {
+                const commitShas = currentPatchCommits.get(String(patchId).toLowerCase()) || [];
+                for (const commitSha of commitShas) {
+                  reviewedCommitShas.add(commitSha);
+                  sourcePullRequests.add(Number(pullRequest.number));
+                }
+              }
+            }
+
+            core.setOutput('reviewed_commit_shas', JSON.stringify([...reviewedCommitShas]));
+            core.setOutput('source_pull_requests', JSON.stringify([...sourcePullRequests].sort((a, b) => a - b)));
+            core.setOutput('legacy_checkpoints', JSON.stringify(legacyCheckpoints));
+            core.setOutput('matched_patch_count', String(reviewedCommitShas.size));
+            core.info(
+              reviewedCommitShas.size
+                ? `Matched ${reviewedCommitShas.size} reviewed patches from PRs ${[...sourcePullRequests].join(', ')}.`
+                : 'No matching reviewed patches were found in related pull requests.',
+            );
+
       - name: Resolve review scope
         id: review_scope
         env:
@@ -233,10 +453,15 @@ jobs:
           LAST_REVIEWED_SHA: ${{ steps.previous_review.outputs.head_sha }}
           LAST_REVIEWED_AT: ${{ steps.previous_review.outputs.reviewed_at }}
           LAST_REVIEW_SOURCE: ${{ steps.previous_review.outputs.source }}
+          CURRENT_MERGE_BASE: ${{ steps.current_patches.outputs.merge_base }}
+          RELATED_REVIEWED_SHAS_JSON: ${{ steps.related_reviews.outputs.reviewed_commit_shas }}
+          RELATED_REVIEW_SOURCE_PRS: ${{ steps.related_reviews.outputs.source_pull_requests }}
+          RELATED_LEGACY_CHECKPOINTS: ${{ steps.related_reviews.outputs.legacy_checkpoints }}
         run: |
           full_pr_range="$BASE_SHA...$HEAD_SHA"
           mode="full-pr"
           diff_range="$full_pr_range"
+          scope_start_sha="$CURRENT_MERGE_BASE"
           scope_description="Review the full pull request diff: $full_pr_range."
           last_review_note="No previous trusted Claude review checkpoint was found."
 
@@ -244,6 +469,7 @@ jobs:
             if git cat-file -e "$LAST_REVIEWED_SHA^{commit}" 2>/dev/null && git merge-base --is-ancestor "$LAST_REVIEWED_SHA" "$HEAD_SHA"; then
               mode="since-last-claude-review"
               diff_range="$LAST_REVIEWED_SHA..$HEAD_SHA"
+              scope_start_sha="$LAST_REVIEWED_SHA"
               scope_description="Review current PR changes not checked since Claude last reviewed commit $LAST_REVIEWED_SHA. Use $full_pr_range as the current full PR diff and ignore base-only branch update changes."
               last_review_note="Last trusted Claude checkpoint: $LAST_REVIEWED_SHA from $LAST_REVIEW_SOURCE."
             else
@@ -255,6 +481,7 @@ jobs:
             if [[ -n "$checkpoint_sha" ]] && git merge-base --is-ancestor "$checkpoint_sha" "$HEAD_SHA"; then
               mode="since-last-claude-comment"
               diff_range="$checkpoint_sha..$HEAD_SHA"
+              scope_start_sha="$checkpoint_sha"
               scope_description="Review current PR changes not checked since the latest trusted Claude bot comment at $LAST_REVIEWED_AT. Use $full_pr_range as the current full PR diff and ignore base-only branch update changes."
               last_review_note="No checkpoint marker existed. Approximated the last reviewed commit as $checkpoint_sha from trusted Claude bot comment time $LAST_REVIEWED_AT."
             else
@@ -263,10 +490,64 @@ jobs:
             fi
           fi
 
+          related_reviewed_index="$RUNNER_TEMP/related-reviewed-shas.txt"
+          : > "$related_reviewed_index"
+          jq -r '.[] | select(test("^[a-f0-9]{40}$"))' <<< "${RELATED_REVIEWED_SHAS_JSON:-[]}" >> "$related_reviewed_index"
+
+          source_pr_index="$RUNNER_TEMP/related-review-source-prs.txt"
+          : > "$source_pr_index"
+          jq -r '.[]' <<< "${RELATED_REVIEW_SOURCE_PRS:-[]}" >> "$source_pr_index"
+
+          while IFS=$'\t' read -r legacy_base legacy_head legacy_pr; do
+            if
+              [[ "$legacy_base" =~ ^[a-f0-9]{40}$ ]] &&
+              [[ "$legacy_head" =~ ^[a-f0-9]{40}$ ]] &&
+              [[ "$legacy_pr" =~ ^[0-9]+$ ]] &&
+              git cat-file -e "$legacy_base^{commit}" 2>/dev/null &&
+              git cat-file -e "$legacy_head^{commit}" 2>/dev/null &&
+              git merge-base --is-ancestor "$legacy_base" "$scope_start_sha" &&
+              git merge-base --is-ancestor "$scope_start_sha" "$legacy_head" &&
+              git merge-base --is-ancestor "$legacy_head" "$HEAD_SHA"
+            then
+              git rev-list "$scope_start_sha..$legacy_head" >> "$related_reviewed_index"
+              echo "$legacy_pr" >> "$source_pr_index"
+            fi
+          done < <(
+            jq -r '.[] | [.base_sha, .head_sha, (.pull_request | tostring)] | @tsv' <<< "${RELATED_LEGACY_CHECKPOINTS:-[]}"
+          )
+
+          source_prs="$(
+            sort -nu "$source_pr_index" |
+              jq -Rrsc 'split("\n") | map(select(length > 0) | tonumber) | unique | map("#" + tostring) | join(", ")'
+          )"
+          sort -u -o "$related_reviewed_index" "$related_reviewed_index"
+
+          reviewed_commits=()
+          unreviewed_commits=()
+          while read -r commit_sha; do
+            if grep -Fxq "$commit_sha" "$related_reviewed_index"; then
+              reviewed_commits+=("$commit_sha")
+            else
+              unreviewed_commits+=("$commit_sha")
+            fi
+          done < <(git rev-list --reverse "$scope_start_sha..$HEAD_SHA")
+
+          reviewed_commit_shas="${reviewed_commits[*]}"
+          unreviewed_commit_shas="${unreviewed_commits[*]}"
+
+          if (( ${#reviewed_commits[@]} > 0 )); then
+            mode="cross-pr-deduplicated"
+            scope_description="Review only these unreviewed commits: ${unreviewed_commit_shas:-none}. Treat commits already reviewed in ${source_prs:-related pull requests} as context only and do not repeat their findings."
+            last_review_note="$last_review_note Cross-PR reviewed commits: $reviewed_commit_shas from ${source_prs:-related pull requests}."
+          fi
+
           {
             echo "mode=$mode"
             echo "diff_range=$diff_range"
             echo "full_pr_diff_range=$full_pr_range"
+            echo "reviewed_commit_shas=$reviewed_commit_shas"
+            echo "unreviewed_commit_shas=$unreviewed_commit_shas"
+            echo "related_review_source_prs=$source_prs"
             echo "scope_description<<EOF"
             echo "$scope_description"
             echo "EOF"
@@ -667,6 +948,9 @@ jobs:
             FULL PR RANGE: ${{ steps.review_scope.outputs.full_pr_diff_range }}
             REVIEW SCOPE: ${{ steps.review_scope.outputs.scope_description }}
             LAST REVIEW: ${{ steps.review_scope.outputs.last_review_note }}
+            CROSS-PR REVIEWED COMMITS: ${{ steps.review_scope.outputs.reviewed_commit_shas }}
+            UNREVIEWED COMMITS: ${{ steps.review_scope.outputs.unreviewed_commit_shas }}
+            RELATED REVIEWED PRS: ${{ steps.review_scope.outputs.related_review_source_prs }}
             CROSS-REPO CONTEXT DIR: ${{ steps.checkout_context.outputs.context_dir }}
             EXISTING LINKED ISSUE: ${{ steps.existing_issue.outputs.ref }}
             PR DESCRIPTION PROVENANCE: ${{ steps.description_provenance.outputs.kind }}
@@ -677,6 +961,8 @@ jobs:
             Scope rules:
             - For full-pr mode, review the full PR diff.
             - For since-last-claude-review and since-last-claude-comment mode, focus findings on current PR changes that were not checked after the last trusted Claude review checkpoint.
+            - For cross-pr-deduplicated mode, review only UNREVIEWED COMMITS with `git show`. Treat CROSS-PR REVIEWED COMMITS as context only; do not report code or documentation findings solely from those commits unless an unreviewed commit materially changes their behavior.
+            - If cross-pr-deduplicated mode has no UNREVIEWED COMMITS, do not post code or documentation findings; only apply and briefly explain the SDLC label.
             - REVIEW RANGE may include base branch update commits. Use FULL PR RANGE as the current pull request diff and do not report base-only branch update changes.
             - Do not report issues that already existed before the last trusted Claude review checkpoint unless they are critical, exploitable, or made materially worse by the new commits.
             - For SDLC label classification, consider the full pull request, not only the incremental range.
@@ -784,6 +1070,7 @@ jobs:
           REVIEW_SCOPE_MODE: ${{ steps.review_scope.outputs.mode }}
           REVIEW_RANGE: ${{ steps.review_scope.outputs.diff_range }}
           FULL_PR_RANGE: ${{ steps.review_scope.outputs.full_pr_diff_range }}
+          CURRENT_PATCHES_JSON: ${{ steps.current_patches.outputs.patches_json }}
         with:
           script: |
             const owner = context.repo.owner;
@@ -801,8 +1088,21 @@ jobs:
               throw new Error(`Cannot record Claude review checkpoint; invalid reviewed head SHA: ${reviewedHeadSha}`);
             }
 
+            let currentPatches;
+            try {
+              currentPatches = JSON.parse(process.env.CURRENT_PATCHES_JSON || '[]');
+            } catch (error) {
+              throw new Error(`Cannot record Claude review checkpoint; invalid patch index: ${error.message}`);
+            }
+
+            const reviewedPatchIds = [...new Set(
+              currentPatches
+                .map((entry) => String(entry.patch_id || '').toLowerCase())
+                .filter((patchId) => /^[a-f0-9]{40}$/.test(patchId)),
+            )].slice(-500);
+
             const checkpoint = {
-              version: 1,
+              version: 2,
               repository: nameWithOwner,
               pull_request: issueNumber,
               head_sha: reviewedHeadSha,
@@ -810,6 +1110,7 @@ jobs:
               review_mode: process.env.REVIEW_SCOPE_MODE,
               review_range: process.env.REVIEW_RANGE,
               full_pr_range: process.env.FULL_PR_RANGE,
+              reviewed_patch_ids: reviewedPatchIds,
               reviewed_at: new Date().toISOString(),
               workflow_run_id: String(context.runId),
               workflow_run_attempt: String(context.runAttempt),
