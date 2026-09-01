@@ -721,7 +721,7 @@ jobs:
             - Merely touching production code, changing user-visible behavior, or mentioning customers, users, data, security, or privacy is not enough to require review.
             - If INTERNAL APP is true and the PR does not touch customer/user data, security, privacy, or critical functionality, use `change: routine`.
             - If the evidence is uncertain or no concrete material impact can be named, use `change: routine`.
-            - Before choosing `change: needs review`, state the concrete material impact in a finding or top-level comment.
+            - Report the selected label in one short sentence, for example: ``SDLC label: `change: needs review` because it touches authentication.`` Adapt the label and reason; never add a separate rationale paragraph.
             - Remove the label you did not choose if it is present.
 
             PR description rules:
@@ -754,13 +754,14 @@ jobs:
             - Report actionable bugs, security or privacy risks, edge cases, regressions, maintainability issues, and useful nitpicks. Ignore formatter/linter output, preference-only feedback, and low-confidence concerns.
             - Verify findings by tracing relevant code and callers and, when practical, with a focused test or temporary local patch. Leave the working tree unchanged.
             - Keep each finding's prose to one or two sentences: the concrete impact and smallest fix. Assume an experienced developer and group repeated instances.
-            - Prefer an inline comment on the narrowest relevant changed lines. Use at most one top-level PR comment, only for unanchorable findings or the documentation update; include the selected SDLC label there when present.
+            - Prefer an inline comment on the narrowest relevant changed lines. Use at most one general top-level comment for unanchorable findings and the one-sentence SDLC label reason. A required documentation update uses its separate exact template comment.
             - Check existing Claude comments first. Never repeat an unchanged finding or documentation update, or summarize inline findings in the top-level comment.
             - Do not add generic praise, long summaries, or explanations of basic concepts.
+            - Do not narrate the review process or validation. Never post `No documentation update needed`, `No actionable issues found`, `No code findings`, or equivalent status or absence text.
             - For fixes that fit in at most three small replacements, add complete GitHub `suggestion` blocks instead of changing the branch.
             - For a larger fix, leave one concise finding for the built-in `Fix this` link and include: `Create a separate branch from the current PR head, commit and push only that branch, and return its link so it can be merged into the current PR branch. Do not open a pull request.`
             - Do not create branches, commits, or pull requests during this review workflow.
-            - If there are no findings, do not post a review comment; the workflow check and label are enough.
+            - If there are no findings or documentation update, the one-sentence SDLC label reason is the only review text to post.
             - If validation fails or you cannot safely validate, say that plainly without long reasoning.
             - Do not create tracking issues. The workflow handles linked issue creation and final checklist enforcement after labels are finalized.
             - Your final response must satisfy the configured JSON schema. Use it only for the separate issue draft fields; continue to post review findings through the normal GitHub review tools.
