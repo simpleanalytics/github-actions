@@ -156,6 +156,7 @@ test('trusted version-2 checkpoints match identical patches', async () => {
   assert.deepEqual(JSON.parse(result.outputs.get('reviewed_commit_shas')), [commitSha]);
   assert.deepEqual(JSON.parse(result.outputs.get('source_pull_requests')), [12]);
   assert.equal(result.outputs.get('matched_patch_count'), '1');
+  assert.equal(result.outputs.get('lookup_status'), 'matched');
 });
 
 test('untrusted and old merged checkpoints do not suppress review', async () => {
@@ -212,6 +213,7 @@ test('lookup failure falls back without suppressing commits', async () => {
 
   assert.deepEqual(JSON.parse(result.outputs.get('reviewed_commit_shas')), []);
   assert.deepEqual(JSON.parse(result.outputs.get('legacy_checkpoints')), []);
+  assert.equal(result.outputs.get('lookup_status'), 'failed');
   assert.match(result.warnings[0], /reviewing normally/);
 });
 
@@ -222,6 +224,7 @@ test('review scope excludes a commit matched by a version-2 patch checkpoint', a
   }).trim().split('\n');
   const temporaryDirectory = await mkdtemp(join(repositoryRoot, '.tmp-cross-pr-review-scope-'));
   const outputPath = join(temporaryDirectory, 'github-output');
+  const summaryPath = join(temporaryDirectory, 'github-summary');
 
   try {
     const result = spawnSync('bash', ['-e'], {
@@ -239,7 +242,10 @@ test('review scope excludes a commit matched by a version-2 patch checkpoint', a
         RELATED_REVIEWED_SHAS_JSON: JSON.stringify([headSha]),
         RELATED_REVIEW_SOURCE_PRS: '[12]',
         RELATED_LEGACY_CHECKPOINTS: '[]',
+        RELATED_LOOKUP_STATUS: 'matched',
+        RELATED_LOOKUP_MESSAGE: 'Matched one patch.',
         GITHUB_OUTPUT: outputPath,
+        GITHUB_STEP_SUMMARY: summaryPath,
         RUNNER_TEMP: temporaryDirectory,
       },
     });
@@ -250,6 +256,8 @@ test('review scope excludes a commit matched by a version-2 patch checkpoint', a
     assert.match(output, new RegExp(`^reviewed_commit_shas=${headSha}$`, 'm'));
     assert.match(output, /^unreviewed_commit_shas=$/m);
     assert.match(output, /^related_review_source_prs=#12$/m);
+    assert.match(result.stdout, /::notice title=Cross-PR review deduplication::Skipped 1 already-reviewed commit/);
+    assert.match(await readFile(summaryPath, 'utf8'), /Source PRs: #12/);
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
@@ -262,6 +270,7 @@ test('version-1 checkpoint ancestry is reused only when it covers the current ra
   }).trim().split('\n');
   const temporaryDirectory = await mkdtemp(join(repositoryRoot, '.tmp-legacy-review-scope-'));
   const outputPath = join(temporaryDirectory, 'github-output');
+  const summaryPath = join(temporaryDirectory, 'github-summary');
 
   try {
     const result = spawnSync('bash', ['-e'], {
@@ -283,7 +292,10 @@ test('version-1 checkpoint ancestry is reused only when it covers the current ra
           head_sha: headSha,
           pull_request: 13,
         }]),
+        RELATED_LOOKUP_STATUS: 'no-match',
+        RELATED_LOOKUP_MESSAGE: 'No matching version-2 patches.',
         GITHUB_OUTPUT: outputPath,
+        GITHUB_STEP_SUMMARY: summaryPath,
         RUNNER_TEMP: temporaryDirectory,
       },
     });
@@ -293,6 +305,8 @@ test('version-1 checkpoint ancestry is reused only when it covers the current ra
     assert.match(output, /^mode=cross-pr-deduplicated$/m);
     assert.match(output, new RegExp(`^reviewed_commit_shas=${headSha}$`, 'm'));
     assert.match(output, /^related_review_source_prs=#13$/m);
+    assert.match(result.stdout, /::notice title=Cross-PR review deduplication::Skipped 1 already-reviewed commit/);
+    assert.match(await readFile(summaryPath, 'utf8'), /Source PRs: #13/);
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
@@ -303,4 +317,11 @@ test('version-2 checkpoints and prompt rules preserve reviewed patches as contex
   assert.match(workflow, /reviewed_patch_ids: reviewedPatchIds/);
   assert.match(workflow, /For cross-pr-deduplicated mode, review only UNREVIEWED COMMITS/);
   assert.match(workflow, /do not report code or documentation findings solely from those commits/);
+});
+
+test('workflow annotations explain matches and lookup failures', () => {
+  assert.match(workflow, /core\.warning\(message, \{ title: 'Cross-PR review deduplication' \}\)/);
+  assert.match(workflow, /::notice title=Cross-PR review deduplication::Skipped/);
+  assert.match(workflow, /lookup failed; retained the normal review scope/);
+  assert.match(workflow, /### Cross-PR review deduplication/);
 });

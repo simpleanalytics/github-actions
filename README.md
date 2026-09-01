@@ -21,7 +21,7 @@ jobs:
       internal_app: false
 ```
 
-Claude reviews full PR diffs on `opened` and `reopened`, and only the newly pushed commit range on `synchronize` unless a critical issue is still present. It also avoids repeating identical patches already reviewed in up to 50 recently updated open PRs or 20 PRs merged during the previous 14 days. Cross-PR lookup is capped at 30 seconds and falls back to the normal review scope if GitHub is unavailable. The workflow creates and applies exactly one SDLC label:
+Claude reviews full PR diffs on `opened` and `reopened`, and only the newly pushed commit range on `synchronize` unless a critical issue is still present. It also avoids repeating identical patches already reviewed in up to 50 recently updated open PRs or 20 PRs merged during the previous 14 days. Cross-PR lookup is capped at 30 seconds and falls back to the normal review scope if GitHub is unavailable. Matches and failures appear as GitHub Actions annotations with details in the run summary. The workflow creates and applies exactly one SDLC label:
 
 Review findings prefer concise inline comments. Small fixes use complete GitHub suggested changes; fixes needing more than three small replacements use a `Fix this` link that asks Claude Code to create a separate branch from the current PR head and return its link without opening another pull request. When needed, one top-level comment contains only findings that cannot be anchored to changed lines and the selected SDLC label; documentation updates use their separate copy-paste-ready template. Clean reviews post only the one-sentence SDLC label reason.
 

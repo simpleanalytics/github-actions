@@ -277,19 +277,25 @@ jobs:
             const markerPattern = /<!--\s*simpleanalytics-claude-pr-review-checkpoint\s+([\s\S]*?)\s*-->/g;
             const shaPattern = /^[a-f0-9]{40}$/i;
 
-            function emptyResult(reason) {
+            function emptyResult(status, message) {
               core.setOutput('reviewed_commit_shas', '[]');
               core.setOutput('source_pull_requests', '[]');
               core.setOutput('legacy_checkpoints', '[]');
               core.setOutput('matched_patch_count', '0');
-              if (reason) core.warning(reason);
+              core.setOutput('lookup_status', status);
+              core.setOutput('lookup_message', message || '');
+              if (status === 'failed') {
+                core.warning(message, { title: 'Cross-PR review deduplication' });
+              } else if (message) {
+                core.info(message);
+              }
             }
 
             let currentPatches;
             try {
               currentPatches = JSON.parse(process.env.CURRENT_PATCHES_JSON || '[]');
             } catch (error) {
-              emptyResult(`Could not parse the current patch index: ${error.message}`);
+              emptyResult('failed', `Could not parse the current patch index: ${error.message}`);
               return;
             }
 
@@ -303,7 +309,7 @@ jobs:
             }
 
             if (!currentPatchCommits.size) {
-              emptyResult('The current pull request has no patch IDs to compare.');
+              emptyResult('no-patches', 'The current pull request has no patch IDs to compare.');
               return;
             }
 
@@ -359,7 +365,7 @@ jobs:
               }
               result = response.data.data;
             } catch (error) {
-              emptyResult(`Cross-PR checkpoint lookup failed; reviewing normally: ${error.message}`);
+              emptyResult('failed', `Cross-PR checkpoint lookup failed; reviewing normally: ${error.message}`);
               return;
             } finally {
               clearTimeout(timeoutId);
@@ -439,11 +445,14 @@ jobs:
             core.setOutput('source_pull_requests', JSON.stringify([...sourcePullRequests].sort((a, b) => a - b)));
             core.setOutput('legacy_checkpoints', JSON.stringify(legacyCheckpoints));
             core.setOutput('matched_patch_count', String(reviewedCommitShas.size));
-            core.info(
+            const lookupMessage = (
               reviewedCommitShas.size
                 ? `Matched ${reviewedCommitShas.size} reviewed patches from PRs ${[...sourcePullRequests].join(', ')}.`
-                : 'No matching reviewed patches were found in related pull requests.',
+                : 'No matching version-2 patch fingerprints were found in related pull requests.'
             );
+            core.setOutput('lookup_status', reviewedCommitShas.size ? 'matched' : 'no-match');
+            core.setOutput('lookup_message', lookupMessage);
+            core.info(lookupMessage);
 
       - name: Resolve review scope
         id: review_scope
@@ -457,6 +466,8 @@ jobs:
           RELATED_REVIEWED_SHAS_JSON: ${{ steps.related_reviews.outputs.reviewed_commit_shas }}
           RELATED_REVIEW_SOURCE_PRS: ${{ steps.related_reviews.outputs.source_pull_requests }}
           RELATED_LEGACY_CHECKPOINTS: ${{ steps.related_reviews.outputs.legacy_checkpoints }}
+          RELATED_LOOKUP_STATUS: ${{ steps.related_reviews.outputs.lookup_status }}
+          RELATED_LOOKUP_MESSAGE: ${{ steps.related_reviews.outputs.lookup_message }}
         run: |
           full_pr_range="$BASE_SHA...$HEAD_SHA"
           mode="full-pr"
@@ -539,7 +550,25 @@ jobs:
             mode="cross-pr-deduplicated"
             scope_description="Review only these unreviewed commits: ${unreviewed_commit_shas:-none}. Treat commits already reviewed in ${source_prs:-related pull requests} as context only and do not repeat their findings."
             last_review_note="$last_review_note Cross-PR reviewed commits: $reviewed_commit_shas from ${source_prs:-related pull requests}."
+            echo "::notice title=Cross-PR review deduplication::Skipped ${#reviewed_commits[@]} already-reviewed commit(s) from ${source_prs:-related pull requests}; ${#unreviewed_commits[@]} commit(s) remain for review."
           fi
+
+          {
+            echo "### Cross-PR review deduplication"
+            if (( ${#reviewed_commits[@]} > 0 )); then
+              echo "- Result: skipped ${#reviewed_commits[@]} already-reviewed commit(s); ${#unreviewed_commits[@]} remain for review."
+              echo "- Source PRs: ${source_prs:-unknown}"
+              echo "- Skipped commits: $reviewed_commit_shas"
+              echo "- Remaining commits: ${unreviewed_commit_shas:-none}"
+            elif [[ "$RELATED_LOOKUP_STATUS" == "failed" ]]; then
+              echo "- Result: lookup failed; retained the normal review scope."
+              echo "- Details: ${RELATED_LOOKUP_MESSAGE:-unknown failure}"
+            elif [[ "$RELATED_LOOKUP_STATUS" == "no-patches" ]]; then
+              echo "- Result: the current PR has no patch fingerprints to compare."
+            else
+              echo "- Result: no previously reviewed patches apply to the active review scope."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
           {
             echo "mode=$mode"
