@@ -953,6 +953,20 @@ jobs:
             core.setOutput('captured_at', capturedAt);
             core.info(`Classified the existing PR description as ${kind}: ${reason}`);
 
+      - name: Capture existing SDLC label
+        id: existing_sdlc_label
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+            });
+            const labels = issue.labels.map((label) => typeof label === 'string' ? label : label.name);
+            const existingLabel = ['change: needs review', 'change: routine'].find((label) => labels.includes(label)) || '';
+            core.setOutput('label', existingLabel);
+
       - name: Run Claude PR review
         id: claude
         uses: anthropics/claude-code-action@v1
@@ -982,6 +996,7 @@ jobs:
             RELATED REVIEWED PRS: ${{ steps.review_scope.outputs.related_review_source_prs }}
             CROSS-REPO CONTEXT DIR: ${{ steps.checkout_context.outputs.context_dir }}
             EXISTING LINKED ISSUE: ${{ steps.existing_issue.outputs.ref }}
+            EXISTING SDLC LABEL: ${{ steps.existing_sdlc_label.outputs.label }}
             PR DESCRIPTION PROVENANCE: ${{ steps.description_provenance.outputs.kind }}
             PR DESCRIPTION PROVENANCE REASON: ${{ steps.description_provenance.outputs.reason }}
 
@@ -991,7 +1006,7 @@ jobs:
             - For full-pr mode, review the full PR diff.
             - For since-last-claude-review and since-last-claude-comment mode, focus findings on current PR changes that were not checked after the last trusted Claude review checkpoint.
             - For cross-pr-deduplicated mode, review only UNREVIEWED COMMITS with `git show`. Treat CROSS-PR REVIEWED COMMITS as context only; do not report code or documentation findings solely from those commits unless an unreviewed commit materially changes their behavior.
-            - If cross-pr-deduplicated mode has no UNREVIEWED COMMITS, do not post code or documentation findings; only apply and briefly explain the SDLC label.
+            - If cross-pr-deduplicated mode has no UNREVIEWED COMMITS, do not post code or documentation findings; only return any required SDLC assessment through structured output.
             - REVIEW RANGE may include base branch update commits. Use FULL PR RANGE as the current pull request diff and do not report base-only branch update changes.
             - Do not report issues that already existed before the last trusted Claude review checkpoint unless they are critical, exploitable, or made materially worse by the new commits.
             - For SDLC label classification, consider the full pull request, not only the incremental range.
@@ -1020,7 +1035,9 @@ jobs:
             ```
 
             SDLC label rules:
-            - Apply exactly one of these labels to PR #${{ github.event.pull_request.number }} using `gh issue edit`: `change: needs review` or `change: routine`.
+            - If EXISTING SDLC LABEL is non-empty, treat it as authoritative. Do not reassess, change, remove, or comment on it; return empty strings for `sdlc_label` and `sdlc_reason`.
+            - Otherwise, return exactly one of `change: needs review` or `change: routine` in `sdlc_label` and a short reason in `sdlc_reason`, without the label prefix or "because".
+            - Never apply labels or post an SDLC label message yourself, including in review comments or summaries. The workflow preserves existing labels and posts a reason only when neither an SDLC label nor an earlier SDLC message exists.
             - Start with `change: routine`. Use `change: needs review` only when the full PR diff establishes at least one concrete, material impact listed below.
             - Use `change: needs review` for a material change to:
               - who can access customer, user, or sensitive data, or how that data is collected, exposed, shared, transferred, deleted, or retained;
@@ -1036,11 +1053,9 @@ jobs:
             - Merely touching production code, changing user-visible behavior, or mentioning customers, users, data, security, or privacy is not enough to require review.
             - If INTERNAL APP is true and the PR does not touch customer/user data, security, privacy, or critical functionality, use `change: routine`.
             - If the evidence is uncertain or no concrete material impact can be named, use `change: routine`.
-            - Report the selected label in one short sentence, for example: ``SDLC label: `change: needs review` because it touches authentication.`` Adapt the label and reason; never add a separate rationale paragraph.
-            - Remove the label you did not choose if it is present.
 
             PR description rules:
-            - If you choose `change: needs review`, update PR #${{ github.event.pull_request.number }} with the Simple Analytics PR template before finishing. Use `gh pr edit`.
+            - If EXISTING SDLC LABEL or your new assessment is `change: needs review`, update PR #${{ github.event.pull_request.number }} with the Simple Analytics PR template before finishing. Use `gh pr edit`.
             - Read the current PR description and commit messages before updating the body.
             - The workflow classified the existing body as `PR DESCRIPTION PROVENANCE`. Follow that classification even when the PR author, branch, or commits have different provenance.
             - For a `human` description, treat every existing word as authoritative. Preserve its wording, order, headings, subheadings, images, attachment links, links, notes, and custom sections. Only add a missing required heading or minimally normalize the required `Security implications` and `Checklist` formats.
@@ -1058,35 +1073,35 @@ jobs:
 
             Issue description rules:
             - The issue description is a separate writing task from the PR description. Do not copy or adapt the PR `Summary`.
-            - If you choose `change: needs review` and EXISTING LINKED ISSUE is empty, return an issue draft through the structured output fields.
+            - If EXISTING SDLC LABEL or your new assessment is `change: needs review` and EXISTING LINKED ISSUE is empty, return an issue draft through the structured output fields.
             - `issue_title` must describe the unresolved problem. Do not prefix it with `Track:` and do not refer to the pull request.
             - `issue_problem` must describe the current problem, symptoms, impact, and useful known context in present tense. Do not claim that anything was fixed, changed, added, or implemented, and do not refer to a PR.
             - `issue_suggested_changes` must contain concise proposed outcomes, investigation areas, or requirements. Treat them as suggestions, not completed work or an exact implementation.
             - Do not include Markdown section headings in the structured fields and do not prefix suggested-change entries with bullets; the workflow adds the issue formatting.
-            - If you choose `change: routine` or EXISTING LINKED ISSUE is non-empty, return empty strings and an empty array for the issue draft fields.
+            - If EXISTING SDLC LABEL or your new assessment is `change: routine`, or EXISTING LINKED ISSUE is non-empty, return empty strings and an empty array for the issue draft fields.
 
             Review comments and fixes:
             - Report actionable bugs, security or privacy risks, edge cases, regressions, maintainability issues, and useful nitpicks. Ignore formatter/linter output, preference-only feedback, and low-confidence concerns.
             - Verify findings by tracing relevant code and callers and, when practical, with a focused test or temporary local patch. Leave the working tree unchanged.
             - Keep each finding's prose to one or two sentences: the concrete impact and smallest fix. Assume an experienced developer and group repeated instances.
-            - Prefer an inline comment on the narrowest relevant changed lines. Use at most one general top-level comment for unanchorable findings and the one-sentence SDLC label reason. A required documentation update uses its separate exact template comment.
+            - Prefer an inline comment on the narrowest relevant changed lines. Use at most one general top-level comment for unanchorable findings. A required documentation update uses its separate exact template comment.
             - Check existing Claude comments first. Never repeat an unchanged finding or documentation update, or summarize inline findings in the top-level comment.
             - Do not add generic praise, long summaries, or explanations of basic concepts.
             - Do not narrate the review process or validation. Never post `No documentation update needed`, `No actionable issues found`, `No code findings`, or equivalent status or absence text.
             - For fixes that fit in at most three small replacements, add complete GitHub `suggestion` blocks instead of changing the branch.
             - For a larger fix, leave one concise finding for the built-in `Fix this` link and include: `Create a separate branch from the current PR head, commit and push only that branch, and return its link so it can be merged into the current PR branch. Do not open a pull request.`
             - Do not create branches, commits, or pull requests during this review workflow.
-            - If there are no findings or documentation update, the one-sentence SDLC label reason is the only review text to post.
+            - If there are no findings or documentation update, do not post review text.
             - If validation fails or you cannot safely validate, say that plainly without long reasoning.
             - Do not create tracking issues. The workflow handles linked issue creation and final checklist enforcement after labels are finalized.
-            - Your final response must satisfy the configured JSON schema. Use it only for the separate issue draft fields; continue to post review findings through the normal GitHub review tools.
+            - Your final response must satisfy the configured JSON schema. Use it for the SDLC assessment and separate issue draft fields; continue to post review findings through the normal GitHub review tools.
 
             Extra repository instructions:
             ${{ inputs.claude_extra_prompt }}
           claude_args: |
             --model ${{ inputs.claude_model }}
             --allowedTools "Agent,AskUserQuestion,Bash,Glob,Grep,LS,Read,Edit,MultiEdit,Write,NotebookRead,NotebookEdit,TodoRead,TodoWrite,Skill,WebFetch,WebSearch,mcp__github__*,mcp__github_inline_comment__*,mcp__github_ci__*"
-            --json-schema '{"type":"object","properties":{"issue_title":{"type":"string"},"issue_problem":{"type":"string"},"issue_suggested_changes":{"type":"array","items":{"type":"string"}}},"required":["issue_title","issue_problem","issue_suggested_changes"],"additionalProperties":false}'
+            --json-schema '{"type":"object","properties":{"sdlc_label":{"type":"string","enum":["","change: routine","change: needs review"]},"sdlc_reason":{"type":"string"},"issue_title":{"type":"string"},"issue_problem":{"type":"string"},"issue_suggested_changes":{"type":"array","items":{"type":"string"}}},"required":["sdlc_label","sdlc_reason","issue_title","issue_problem","issue_suggested_changes"],"additionalProperties":false}'
 
       - name: Resolve reviewed HEAD
         id: reviewed_head
@@ -1213,6 +1228,9 @@ jobs:
       - name: Finalize SDLC label
         id: sdlc_label
         uses: actions/github-script@v9
+        env:
+          EXISTING_SDLC_LABEL: ${{ steps.existing_sdlc_label.outputs.label }}
+          CLAUDE_STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
         with:
           script: |
             const needsReview = 'change: needs review';
@@ -1226,34 +1244,53 @@ jobs:
             });
 
             const labels = issue.labels.map((label) => typeof label === 'string' ? label : label.name);
-            const hasNeedsReview = labels.includes(needsReview);
-            const hasRoutine = labels.includes(routine);
-            let finalLabel;
+            const currentLabel = [needsReview, routine].find((label) => labels.includes(label));
+            const existingLabel = currentLabel || process.env.EXISTING_SDLC_LABEL;
+            let assessment = {};
+            try {
+              assessment = JSON.parse(process.env.CLAUDE_STRUCTURED_OUTPUT || '{}') || {};
+            } catch (error) {
+              core.warning(`Could not read Claude's SDLC assessment: ${error.message}`);
+            }
+            const assessedLabel = [needsReview, routine].includes(assessment.sdlc_label) ? assessment.sdlc_label : '';
+            const finalLabel = existingLabel || assessedLabel || routine;
+            const reason = typeof assessment.sdlc_reason === 'string' ? assessment.sdlc_reason.trim() : '';
+            let shouldComment = !existingLabel && Boolean(assessedLabel && reason);
 
-            if (hasNeedsReview && hasRoutine) {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issueNumber,
-                name: routine,
-              }).catch((error) => {
-                if (error.status !== 404) throw error;
-              });
-              finalLabel = needsReview;
-              core.warning(`Both SDLC labels were present. Kept '${needsReview}' and removed '${routine}'.`);
-            } else if (hasNeedsReview) {
-              finalLabel = needsReview;
-            } else if (hasRoutine) {
-              finalLabel = routine;
-            } else {
+            if (shouldComment) {
+              const [comments, reviews] = await Promise.all([
+                github.paginate(github.rest.issues.listComments, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  per_page: 100,
+                }),
+                github.paginate(github.rest.pulls.listReviews, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: issueNumber,
+                  per_page: 100,
+                }),
+              ]);
+              shouldComment = ![...comments, ...reviews].some((message) => /\bSDLC label\s*:/i.test(message.body || ''));
+            }
+
+            if (!currentLabel) {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: issueNumber,
-                labels: [routine],
+                labels: [finalLabel],
               });
-              finalLabel = routine;
-              core.warning(`No SDLC label was present after Claude review. Added default '${routine}'.`);
+            }
+
+            if (shouldComment) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: `SDLC label: \`${finalLabel}\` because ${reason}`,
+              });
             }
 
             core.setOutput('label', finalLabel);
