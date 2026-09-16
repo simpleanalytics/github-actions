@@ -11,6 +11,17 @@ const labelRules = workflow.match(
   /            SDLC label rules:\n([\s\S]*?)\n            PR description rules:/,
 )?.[1];
 
+test('the signed Simple Analytics bot can trigger reviews by default', () => {
+  const allowedBots = workflow.match(
+    /      claude_allowed_bots:[\s\S]*?        default: "([^"]+)"/,
+  )?.[1];
+
+  assert.equal(
+    allowedBots,
+    'github-actions,github-actions[bot],simple-analytics-ai',
+  );
+});
+
 test('the SDLC prompt defaults uncertain and ordinary changes to routine', () => {
   assert.ok(labelRules, 'SDLC label rules should be present');
   assert.match(labelRules, /Start with `change: routine`/);

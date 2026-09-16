@@ -22,7 +22,7 @@ on:
         description: "Comma-separated bot actors allowed to trigger automated Claude PR review"
         type: string
         required: false
-        default: "github-actions,github-actions[bot]"
+        default: "github-actions,github-actions[bot],simple-analytics-ai"
       context_repositories:
         description: "Newline-separated GitHub repositories to clone as read-only review context"
         type: string
