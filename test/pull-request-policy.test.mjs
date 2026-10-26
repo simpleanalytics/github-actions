@@ -7,10 +7,6 @@ const workflow = await readFile(
   'utf8',
 );
 
-const labelRules = workflow.match(
-  /            SDLC label rules:\n([\s\S]*?)\n            Issue description rules:/,
-)?.[1];
-
 test('the signed Simple Analytics bot can trigger classification by default', () => {
   const allowedBots = workflow.match(
     /      claude_allowed_bots:[\s\S]*?        default: "([^"]+)"/,
@@ -22,50 +18,37 @@ test('the signed Simple Analytics bot can trigger classification by default', ()
   );
 });
 
-test('the SDLC prompt defaults uncertain and ordinary changes to routine', () => {
-  assert.ok(labelRules, 'SDLC label rules should be present');
-  assert.match(labelRules, /Start with `change: routine`/);
-  assert.match(labelRules, /ordinary product features and bug fixes/);
-  assert.match(labelRules, /relabeling an existing analytics field/);
-  assert.match(labelRules, /view display settings while preserving existing authorization/);
-  assert.match(labelRules, /If the evidence is uncertain[^\n]+use `change: routine`/);
-  assert.doesNotMatch(labelRules, /If uncertain, use `change: needs review`/);
+test('the prompt quotes the release risk levels and maps them to the two labels', () => {
+  for (const row of [
+    '| Routine Change | Standard, repeatable, low-risk changes with minimal operational impact | No formal review required |',
+    '| Review Required Change | Changes affecting application behavior, infrastructure, integrations, or customer experience | One review required (human or approved AI-assisted review) |',
+    '| Significant Change | High-impact changes, infrastructure modifications, security-sensitive changes, or changes with potential customer impact | Two reviews required, where at least one reviewer is human |',
+    '| Emergency Change | Critical changes required to restore service availability or address security issues | May be implemented by authorized personnel with post-deployment review required |',
+  ]) {
+    assert.ok(workflow.includes(row), row);
+  }
+  assert.match(workflow, /`change: routine`: a Routine Change or Review Required Change\./);
+  assert.match(workflow, /`change: needs review`: a Significant Change or Emergency Change\./);
+  assert.match(workflow, /When in doubt, choose `change: routine`\./);
 });
 
-test('needs-review classification requires concrete material impact', () => {
-  assert.ok(labelRules, 'SDLC label rules should be present');
-  assert.match(labelRules, /only when the full PR diff establishes at least one concrete, material impact/);
-  assert.match(labelRules, /authentication, authorization, permissions/);
-  assert.match(labelRules, /database schemas, data migrations/);
-  assert.match(labelRules, /credible outage, data-loss, or corruption risk/);
-  assert.match(labelRules, /changing tenant or JWT authorization scope/);
-  assert.match(labelRules, /Merely touching production code[^\n]+is not enough to require review/);
+test('needs-review reasons link to the most critical lines', () => {
+  assert.match(
+    workflow,
+    /For `change: needs review`, end `sdlc_reason` with a link to the lines of the most critical change[^\n]+https:\/\/github\.com\/\$\{\{ github\.repository \}\}\/blob\/\$\{\{ github\.event\.pull_request\.head\.sha \}\}\//,
+  );
 });
 
-test('the labels follow the release risk levels of the SOC 2 procedures', () => {
-  assert.ok(labelRules, 'SDLC label rules should be present');
-  assert.match(labelRules, /`change: routine` covers Routine Changes [^\n]+ and Review Required Changes [^\n]+ may be AI-assisted/);
-  assert.match(labelRules, /`change: needs review` covers Significant Changes [^\n]+ and Emergency Changes [^\n]+ need a human review/);
-  assert.match(labelRules, /use of production data outside production/);
-  assert.match(labelRules, /including fixes for security vulnerabilities/);
-  assert.match(labelRules, /an emergency fix that restores service during a production incident/);
-  assert.match(labelRules, /internal tools, developer tooling, and dependency maintenance/);
-});
-
-test('Claude only classifies unlabeled pull requests without reviewing or changing them', () => {
+test('Claude only classifies unlabeled pull requests with read-only tools', () => {
   assert.match(
     workflow,
     /      - name: Classify SDLC risk with Claude\n        id: claude\n        if: \$\{\{ steps\.existing_sdlc_label\.outputs\.label == '' \}\}\n/,
   );
   assert.match(workflow, /--allowedTools "Bash\(git diff:\*\),Bash\(git log:\*\),Bash\(git show:\*\),Glob,Grep,Read"/);
   assert.doesNotMatch(workflow, /mcp__github|include_fix_links|SA_PAT_ADRIAAN_READ_REPOS/);
-  assert.match(labelRules, /Never apply labels or post an SDLC label message yourself/);
-  assert.doesNotMatch(labelRules, /using `gh issue edit`|Report the selected label|Remove the label/);
-  assert.doesNotMatch(workflow, /only apply and briefly explain the SDLC label|one-sentence SDLC label reason/);
   const schema = JSON.parse(workflow.match(/--json-schema '([^']+)'/)[1]);
   assert.deepEqual(schema.properties.sdlc_label.enum, ['change: routine', 'change: needs review']);
-  assert.ok(schema.required.includes('sdlc_label'));
-  assert.ok(schema.required.includes('sdlc_reason'));
+  assert.deepEqual(schema.required, ['sdlc_label', 'sdlc_reason']);
 });
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -148,7 +131,6 @@ test('a label set during the review takes precedence over the captured label and
   const state = fixture({ labels: [routine], capturedLabel: needsReview, assessment: { sdlc_label: needsReview, sdlc_reason: 'a new assessment' } });
   await state.run();
   assert.equal(state.outputs.label, routine);
-  assert.equal(state.outputs.requires_review, 'false');
   assert.deepEqual(state.mutations, []);
 });
 
@@ -178,7 +160,6 @@ for (const selectedLabel of [routine, needsReview]) {
       { type: 'label', labels: [selectedLabel] },
       { type: 'comment', body: `SDLC label: \`${selectedLabel}\` because the diff establishes this impact.` },
     ]);
-    assert.equal(state.outputs.requires_review, String(selectedLabel === needsReview));
   });
 }
 

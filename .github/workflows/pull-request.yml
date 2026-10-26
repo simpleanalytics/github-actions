@@ -99,216 +99,6 @@ jobs:
             const existingLabel = ['change: needs review', 'change: routine'].find((label) => labels.includes(label)) || '';
             core.setOutput('label', existingLabel);
 
-      - name: Capture existing linked issue
-        id: existing_issue
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const nameWithOwner = `${owner}/${repo}`;
-            const prNumber = context.payload.pull_request.number;
-            const refs = [];
-
-            function addBodyRefs(body) {
-              const pattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+((?:[\w.-]+\/[\w.-]+)?#\d+)/gi;
-              let match;
-
-              while ((match = pattern.exec(body || '')) !== null) {
-                refs.push(match[1]);
-              }
-            }
-
-            const { data: pullRequest } = await github.rest.pulls.get({
-              owner,
-              repo,
-              pull_number: prNumber,
-            });
-            addBodyRefs(pullRequest.body || '');
-
-            try {
-              const result = await github.graphql(`
-                query($owner: String!, $repo: String!, $number: Int!) {
-                  repository(owner: $owner, name: $repo) {
-                    pullRequest(number: $number) {
-                      closingIssuesReferences(first: 20) {
-                        nodes {
-                          number
-                          repository {
-                            nameWithOwner
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              `, { owner, repo, number: prNumber });
-
-              for (const issue of result.repository.pullRequest.closingIssuesReferences.nodes) {
-                refs.push(issue.repository.nameWithOwner === nameWithOwner
-                  ? `#${issue.number}`
-                  : `${issue.repository.nameWithOwner}#${issue.number}`);
-              }
-            } catch (error) {
-              core.warning(`Could not capture closingIssuesReferences via GraphQL: ${error.message}`);
-            }
-
-            const issueRef = refs.find(Boolean) || '';
-            core.setOutput('ref', issueRef);
-            core.info(issueRef
-              ? `Captured existing linked issue ${issueRef}.`
-              : 'No existing linked issue was found.');
-
-      - name: Classify PR description provenance
-        id: description_provenance
-        uses: actions/github-script@v9
-        with:
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const prNumber = context.payload.pull_request.number;
-            const capturedAt = new Date().toISOString();
-            const workflowLogins = new Set(['github-actions', 'github-actions[bot]']);
-            const knownAutomatedLogins = new Set([
-              'claude',
-              'claude[bot]',
-              'github-actions',
-              'github-actions[bot]',
-              'simple-analytics-ai',
-              'simple-analytics-ai[bot]',
-            ]);
-
-            function normalizedLogin(login) {
-              return String(login || '').trim().toLowerCase();
-            }
-
-            function loginLooksAutomated(login) {
-              const normalized = normalizedLogin(login);
-              if (!normalized) return false;
-              if (knownAutomatedLogins.has(normalized)) return true;
-              return /(?:^|[-_])(ai|bot|chatgpt|claude|codex|openai)(?:$|[-_\[])/i.test(normalized);
-            }
-
-            function actorIsAutomated(actor) {
-              const type = actor?.type || actor?.__typename || '';
-              return type === 'Bot' || type === 'App' || loginLooksAutomated(actor?.login);
-            }
-
-            function actorIsHuman(actor) {
-              const type = actor?.type || actor?.__typename || '';
-              return type === 'User' && !loginLooksAutomated(actor?.login);
-            }
-
-            function identityTextLooksAutomated(...values) {
-              const text = values.filter(Boolean).join(' ');
-              return /\b(?:chatgpt|claude|codex|openai)\b|codex@simpleanalytics\.invalid|@anthropic\.com/i.test(text);
-            }
-
-            function bodyLooksAutomated(body) {
-              return [
-                /(?:generated|written|created)\s+(?:with|by)\s+(?:an?\s+)?(?:ai|chatgpt|claude|codex|openai)\b/i,
-                /co-authored-by:\s*(?:chatgpt|claude|codex|openai)\b/i,
-                /<!--\s*(?:ai|chatgpt|claude|codex|openai)[^>]*(?:generated|written|created)/i,
-              ].some((pattern) => pattern.test(body || ''));
-            }
-
-            function commitLooksAutomated(commit) {
-              return (
-                actorIsAutomated(commit.author) ||
-                actorIsAutomated(commit.committer) ||
-                identityTextLooksAutomated(
-                  commit.commit?.author?.name,
-                  commit.commit?.author?.email,
-                  commit.commit?.committer?.name,
-                  commit.commit?.committer?.email,
-                  commit.commit?.message
-                )
-              );
-            }
-
-            const { data: pullRequest } = await github.rest.pulls.get({
-              owner,
-              repo,
-              pull_number: prNumber,
-            });
-            const body = pullRequest.body || '';
-            const edits = [];
-
-            try {
-              const result = await github.graphql(`
-                query($owner: String!, $repo: String!, $number: Int!) {
-                  repository(owner: $owner, name: $repo) {
-                    pullRequest(number: $number) {
-                      userContentEdits(first: 100) {
-                        nodes {
-                          editedAt
-                          editor {
-                            __typename
-                            login
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              `, { owner, repo, number: prNumber });
-
-              edits.push(...(result.repository.pullRequest.userContentEdits.nodes || []));
-            } catch (error) {
-              core.warning(`Could not inspect PR description edit history: ${error.message}`);
-            }
-
-            edits.sort((left, right) => new Date(right.editedAt) - new Date(left.editedAt));
-
-            const commits = await github.paginate(github.rest.pulls.listCommits, {
-              owner,
-              repo,
-              pull_number: prNumber,
-              per_page: 100,
-            });
-            const automatedCommits = commits.filter(commitLooksAutomated);
-            const humanEdit = edits.find((edit) => actorIsHuman(edit.editor));
-            const latestNonWorkflowEdit = edits.find((edit) =>
-              edit.editor && !workflowLogins.has(normalizedLogin(edit.editor.login))
-            );
-            const pullRequestAuthor = pullRequest.user;
-            const automatedBranch = /^(?:ai|bot|chatgpt|claude|codex)[\/-]/i.test(pullRequest.head?.ref || '');
-            const explicitBodySignal = bodyLooksAutomated(body);
-            const workflowBodySignal = body.includes('<!-- simpleanalytics:changes-start -->');
-
-            let kind = 'human';
-            let reason = 'No reliable automation signal was found; preserving the description as human-authored.';
-
-            if (humanEdit) {
-              reason = `A human (${humanEdit.editor.login}) edited the description; human content takes precedence over every automation signal.`;
-            } else if (latestNonWorkflowEdit && actorIsAutomated(latestNonWorkflowEdit.editor)) {
-              kind = 'automated';
-              reason = `The latest substantive description editor is automated (${latestNonWorkflowEdit.editor.login}).`;
-            } else if (explicitBodySignal) {
-              kind = 'automated';
-              reason = 'The description contains an explicit AI-generation marker.';
-            } else if (actorIsHuman(pullRequestAuthor)) {
-              reason = `The pull request author is human (${pullRequestAuthor.login}) and no direct description signal indicates automation.`;
-            } else if (actorIsAutomated(pullRequestAuthor)) {
-              kind = 'automated';
-              reason = `The pull request author is automated (${pullRequestAuthor.login}).`;
-            } else if (commits.length > 0 && automatedCommits.length === commits.length) {
-              kind = 'automated';
-              reason = 'Every pull request commit has an automated author, committer, or AI attribution.';
-            } else if (automatedBranch && automatedCommits.length > 0) {
-              kind = 'automated';
-              reason = 'The agent branch name and commit attribution both indicate automation.';
-            } else if (workflowBodySignal && automatedCommits.length > 0) {
-              kind = 'automated';
-              reason = 'The workflow-managed description marker and commit attribution both indicate automation.';
-            }
-
-            core.setOutput('kind', kind);
-            core.setOutput('reason', reason);
-            core.setOutput('body_base64', Buffer.from(body, 'utf8').toString('base64'));
-            core.setOutput('captured_at', capturedAt);
-            core.info(`Classified the existing PR description as ${kind}: ${reason}`);
-
       - name: Checkout pull request branch
         if: ${{ steps.existing_sdlc_label.outputs.label == '' }}
         uses: actions/checkout@v7
@@ -336,56 +126,208 @@ jobs:
           use_sticky_comment: false
           allowed_bots: ${{ inputs.claude_allowed_bots }}
           prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-            FULL PR RANGE: ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
-            INTERNAL APP: ${{ inputs.internal_app }}
-            EXISTING LINKED ISSUE: ${{ steps.existing_issue.outputs.ref }}
+            ## Pull request
 
-            Classify the SDLC risk of this pull request. Code review is handled elsewhere: do not report findings, post comments, edit files, or change the pull request.
-            Read the change with `git log` and `git diff` on FULL PR RANGE, and inspect surrounding code only when needed to judge impact.
+            - Repository: ${{ github.repository }}
+            - Pull request: #${{ github.event.pull_request.number }}
+            - Base SHA: ${{ github.event.pull_request.base.sha }}
+            - Head SHA: ${{ github.event.pull_request.head.sha }}
+            - Internal app: ${{ inputs.internal_app }}
 
-            SDLC label rules:
-            - Return exactly one of `change: needs review` or `change: routine` in `sdlc_label` and a short reason in `sdlc_reason`, without the label prefix or "because".
-            - Never apply labels or post an SDLC label message yourself. The workflow applies the label and posts the reason.
-            - The labels follow the release risk levels of the Simple Analytics Software Release and Deployment Procedure:
-              - `change: routine` covers Routine Changes (standard, repeatable, low-risk changes with minimal operational impact) and Review Required Changes (changes affecting application behavior, infrastructure, integrations, or customer experience). They need at most one review, which may be AI-assisted.
-              - `change: needs review` covers Significant Changes (high-impact changes, infrastructure modifications, security-sensitive changes, or changes with potential customer impact) and Emergency Changes (critical changes that restore service availability or address security issues). They need a human review, after deployment for Emergency Changes.
-            - Start with `change: routine`. Use `change: needs review` only when the full PR diff establishes at least one concrete, material impact listed below.
-            - Use `change: needs review` for a material change to:
-              - who can access customer, user, or sensitive data, or how that data is collected, exposed, shared, transferred, deleted, or retained;
-              - use of production data outside production, or the anonymization of production data for debugging or testing;
-              - authentication, authorization, permissions, privacy controls, or security boundaries, including fixes for security vulnerabilities;
-              - prices, charges, invoices, subscriptions, or other billing behavior;
-              - database schemas, data migrations, or destructive or bulk data operations;
-              - production infrastructure, routing, certificates, secrets, deployment safety, or rollback behavior;
-              - concurrency, queues, storage, retries, or reliability where the diff creates a credible outage, data-loss, or corruption risk;
-              - account or team deletion, data exports or transfers, or similarly critical system functionality; or
-              - an emergency fix that restores service during a production incident.
-            - Use `change: routine` for all other changes, including ordinary product features and bug fixes, UI or display settings, copy or terminology, design, content, refactors, tests, documentation, internal tools, developer tooling, and dependency maintenance such as package or runtime updates within the same major version, that do not materially change one of the risks above.
-            - Routine examples include relabeling an existing analytics field without changing its collection or storage, and adding view display settings while preserving existing authorization and data-lifecycle boundaries.
-            - Needs-review examples include changing tenant or JWT authorization scope, account deletion behavior, bulk data migrations, billing calculations, or production certificate and routing behavior.
-            - Merely touching production code, changing user-visible behavior, or mentioning customers, users, data, security, or privacy is not enough to require review.
-            - If INTERNAL APP is true and the PR does not touch customer/user data, security, privacy, or critical functionality, use `change: routine`.
-            - If the evidence is uncertain or no concrete material impact can be named, use `change: routine`.
-            - For `change: needs review`, write `sdlc_reason` as the concrete security, data, or stability impact, because the workflow also uses it as the PR's security implications.
+            ## Task
 
-            Issue description rules:
-            - If your assessment is `change: needs review` and EXISTING LINKED ISSUE is empty, return an issue draft through the structured output fields. Otherwise, return empty strings and an empty array for them.
-            - `issue_title` must describe the unresolved problem. Do not prefix it with `Track:` and do not refer to the pull request.
-            - `issue_problem` must describe the current problem, symptoms, impact, and useful known context in present tense. Do not claim that anything was fixed, changed, added, or implemented, and do not refer to a PR.
-            - `issue_suggested_changes` must contain concise proposed outcomes, investigation areas, or requirements. Treat them as suggestions, not completed work or an exact implementation.
-            - Do not include Markdown section headings in the structured fields and do not prefix suggested-change entries with bullets; the workflow adds the issue formatting.
+            Choose the SDLC risk label for this pull request and explain it in one sentence.
+            Read the full change with `git log` and `git diff` from the base SHA to the head SHA. Read surrounding code only when the diff does not show the impact. Do not change anything.
 
-            Extra repository instructions:
+            ## Release risk levels
+
+            For SOC 2, our Software Release and Deployment Procedure gives every change one of four risk levels:
+
+            | Change type | Description | Review requirement |
+            | --- | --- | --- |
+            | Routine Change | Standard, repeatable, low-risk changes with minimal operational impact | No formal review required |
+            | Review Required Change | Changes affecting application behavior, infrastructure, integrations, or customer experience | One review required (human or approved AI-assisted review) |
+            | Significant Change | High-impact changes, infrastructure modifications, security-sensitive changes, or changes with potential customer impact | Two reviews required, where at least one reviewer is human |
+            | Emergency Change | Critical changes required to restore service availability or address security issues | May be implemented by authorized personnel with post-deployment review required |
+
+            The label records the level:
+
+            - `change: routine`: a Routine Change or Review Required Change. No human review is needed.
+            - `change: needs review`: a Significant Change or Emergency Change. A human must review it.
+
+            ## `change: needs review`
+
+            Use it when the change materially affects:
+
+            1. **Personal data:** who can access personal or sensitive data of customers, website visitors, or employees, or how that data is collected, stored, logged, shared, exported, retained, or deleted.
+            2. **Production data outside production:** copying or anonymizing production data for debugging or testing.
+            3. **Security:** authentication, authorization, permissions, encryption, existing secrets, or other security boundaries, including fixes for vulnerabilities in our code.
+            4. **Billing:** prices, charges, invoices, subscriptions, or billing calculations.
+            5. **Existing data:** migrations or operations that drop, rename, rewrite, or bulk-delete existing data.
+            6. **Production infrastructure:** servers, networking, routing, DNS, TLS certificates, SSH, VPN, or firewall access, backups, stateful services, and the deployment and rollback path.
+            7. **Reliability:** concurrency, queues, storage, or retries where the change creates a credible outage, data-loss, or corruption risk.
+            8. **Emergency fix:** a fix that restores service during a production incident.
+
+            ## `change: routine`
+
+            Use it for every change that matches nothing in the `change: needs review` list, for example:
+
+            1. **Product changes:** features and bug fixes.
+            2. **Presentation:** UI, copy, content, and design.
+            3. **Code health:** refactors, tests, and documentation.
+            4. **Tooling:** internal and developer tooling.
+            5. **Additive database changes:** new tables, columns, or indexes.
+            6. **Non-production infrastructure:** CI checks, staging, monitoring dashboards, and alert rules.
+            7. **Updates:** dependency, runtime, and image updates within the same major version.
+            8. **New configuration:** new environment variables, feature flags, or tokens for a feature.
+
+            ## How to decide
+
+            1. Start from `change: routine`.
+            2. Choose `change: needs review` only when you can point to the lines that make a change from its list.
+            3. Touching production code, changing what users see, or mentioning data, security, or privacy is not enough.
+            4. When in doubt, choose `change: routine`.
+            5. If Internal app is true, choose `change: routine` unless the change matches the Personal data or Security item.
+            6. The repository notes below refine both lists for that repository. When a note and a list disagree, the note wins.
+
+            ## Output
+
+            - `sdlc_label`: `change: routine` or `change: needs review`.
+            - `sdlc_reason`: one sentence on the concrete impact, without the label or "because".
+            - For `change: needs review`, end `sdlc_reason` with a link to the lines of the most critical change, for example `[src/auth.ts#L40-L52](https://github.com/${{ github.repository }}/blob/${{ github.event.pull_request.head.sha }}/src/auth.ts#L40-L52)`. Take the line numbers from the `git diff` hunk headers. For a deletion, use the base SHA and the removed lines.
+
+            ## Repository notes
+
+            ### simpleanalytics/admin
+            Internal admin panel with full access to customer accounts and subscriptions.
+            Needs review: the SSO and group check in `index.js`; new or changed actions or views on customer data (`routes/customer/`, `routes/team/`, `routes/data/`); debug exports and their audit trail.
+
+            ### simpleanalytics/ai-plugins
+            Customer CLI, SDK, and agent skills that run with the customer's own API key.
+            Needs review: storing, logging, or sending API keys anywhere except our API; destructive admin commands; removing the rule against personal data in event skills.
+
+            ### simpleanalytics/assistant
+            AI chat behind the dashboard that sends a customer's analytics to an AI provider.
+            Needs review: token checks and team or website scoping in `src/server.ts`; tools or fetches that change which customer data goes to the AI provider; changing the AI provider or its data retention.
+
+            ### simpleanalytics/boardroom
+            Internal compliance app with employee personal data, contracts, and access reviews.
+            Needs review: access rules (`src/proxy.ts`, `src/lib/auth-boundary.ts`, `src/lib/access-authorization.ts`, `src/server/auth/`); anything that lets an employee see other employees' data; encryption of personal data or credentials; deleting documents or evidence; the merged pull request review check.
+
+            ### simpleanalytics/caddy-docker-image
+            Web server image that serves TLS for customers' custom domains.
+            Routine: Caddy v2 updates. Needs review: adding, removing, or changing plugins; major upgrades.
+
+            ### simpleanalytics/common
+            Shared library used by most services.
+            Needs review: internal SSO auth (`src/internal-auth`); Elasticsearch templates, mappings, and retention (`src/elasticsearch`); certificate reloading (`src/ssl`); tax, currency, and plan helpers used for billing.
+
+            ### simpleanalytics/cookie-report
+            Cookie and consent scanner with a public scanner, employee login, and AI analysis.
+            Routine: detection, scoring, AI prompts, report UI, and budget values in `src/config.ts`.
+            Needs review: login and API key capabilities (`src/auth.ts`, `src/services/api-keys.ts`); who can see hidden or in-progress reports; URL fetch guards (`src/security/url.ts`, `src/ai/source-fetch.ts`); visitor IP handling (`src/services/marketing-admission.ts`); sending more than public scan evidence to the AI provider.
+
+            ### simpleanalytics/dashboard
+            Main customer app with accounts, teams, API keys, billing, and analytics exports.
+            Needs review: login, signup, SSO, API and partner keys, team roles and invites (`src/services/auth.ts`, `src/db/partner-auth.ts`, `src/db/team.ts`); billing (`src/lib/stripe.ts`, `src/responders/pay`, payment webhooks and cron jobs); deletion and exports (`src/lib/data-deletion.ts`, `websites/export.ts`, `api/export`); making customer data public or sending it to third parties. `src/db/scheme.sql` runs on boot, so check it against the Existing data item.
+
+            ### simpleanalytics/docs, simpleanalytics/status, simpleanalytics/.github
+            Public static sites and templates. Always routine.
+
+            ### simpleanalytics/dropzone
+            Internal uploader that strips metadata and publishes files publicly.
+            Needs review: metadata scrubbing in `src/server.ts`; overwriting existing public files; storage credentials.
+
+            ### simpleanalytics/elasticsearch-api
+            Internal API that queries, exports, migrates, and deletes visitor analytics.
+            Routine: new or tuned read queries and aggregations.
+            Needs review: delete, reindex, and migration endpoints (`server/rest/datapoints.js`, `server/rest/meta.js`, `lib/migration-query.js`, `scripts/migrate`); index mappings; exports (`server/rest/export.js`); basic auth in `server/index.js`; backup checks; hostname scoping of queries.
+
+            ### simpleanalytics/github-actions
+            Shared workflows, including production deploys and these risk labels.
+            Needs review: `deploy.yml`; workflow permissions, secrets, and tokens; changes that let a pull request avoid `change: needs review`.
+
+            ### simpleanalytics/ide-config
+            Agent instructions and the GitHub token broker for developer machines.
+            Needs review: `tools/github-app-token-broker/`; loosening the GitHub access rules in `AGENTS.md`.
+
+            ### simpleanalytics/infrastructure
+            Configuration for all of production.
+            Routine: dashboards, alert rules, tests, docs, a new environment variable or token for a feature, same-major updates in `ansible/vars/docker_tags.yml`, and VPN rules that only connect one person's own devices.
+            Needs review: SSH, VPN, and firewall access (`ansible/roles/ssh`, `ansible/vars/ssh.yml`, groups, tags, or cross-user rules in `ansible/roles/headscale/files/acl.json`); login gates (`ansible/vars/internal-services.yml`, router middlewares); DNS (`tofu/config/dns/`); TLS and certificate trust; rotating or removing existing secrets; backups; the deploy path (`scripts/deploy.sh`, `ansible/roles/apps`); stateful services such as Elasticsearch, RabbitMQ, and Redis.
+
+            ### simpleanalytics/intranet
+            Internal docs with runbooks and the SOC 2 policies.
+            Needs review: policy text in `app/policies/`; pages with real credentials or customer data.
+
+            ### simpleanalytics/marketing-site
+            Public website whose server also handles signup, referral checks, job applications, and scanner visitor IPs.
+            Needs review: what dashboard lookups expose (`plugins/affiliate.server.ts`, `server/api/is-public.get.ts`); the signup payload (`stores/signup.ts`); where applicant data goes (`server/api/jobs/`); scanner access, IP forwarding, and its API key (`server/api/cookie-scanner/`, `server/utils/cookie-scanner-security.ts`); server-side fetches of user-entered hosts (`server/utils/check-ssl.ts`).
+
+            ### simpleanalytics/online
+            Live visitor counter that streams pageviews to dashboard users.
+            Needs review: subscriber authentication (`src/lib/authenticate.ts`, `src/lib/packethandler.ts`); which visit fields are broadcast (`src/routes/visit.ts`, `src/lib/sanitize.ts`).
+
+            ### simpleanalytics/queue
+            Ingestion service for every pageview and event.
+            Routine: robot detection, block lists, and metrics.
+            Needs review: what is stored or logged from a request (`lib/sanitize.js`, `lib/converters.js`, `utils/parse.js`, IP use in `router.js` and `lib/ips.js`); datastream routing (`utils/datastreams.js`); acknowledgements, retries, and rejections that can drop data (`rabbitmq/`).
+
+            ### simpleanalytics/rabbitmq-docker-image
+            Message broker image that buffers every incoming pageview.
+            Routine: patch updates within the same minor version. Needs review: minor or major upgrades and plugin changes.
+
+            ### simpleanalytics/recall
+            Internal AI archive of employee chat history, newsletters, and de-identified support conversations.
+            Needs review: roles, SSO, tokens, and MCP auth (`apps/web/src/server/auth.ts`, `permissions.ts`, `api-auth.ts`, `src/proxy.ts`); weakening the support privacy gate or raw data retention (`apps/privacy-worker`, `app/api/privacy/`); new sources that expose more employee or customer data; credential encryption and database roles; exports.
+
+            ### simpleanalytics/screenshots
+            Screenshot and image proxy that fetches any URL.
+            Needs review: URL validation and fetching in `index.js`; cache purge credentials (`lib/cloudflare.js`).
+
+            ### simpleanalytics/scripts
+            The public tracking script that customer websites embed. Ignore generated `/dist` output.
+            Routine: new payload fields that carry no personal data.
+            Needs review: anything that could collect personal or identifying visitor data or ignore opt-outs (identifiers, cookies, storage, form values, unsanitized URLs or query values, Do Not Track, collection defaults); `deploy.mts` and `.github/workflows/release.yml`.
+
+            ### simpleanalytics/shopify-app
+            Shopify app that adds the script to stores and sends checkout events.
+            Needs review: access scopes and webhooks in `shopify.app.toml`; auth and sessions (`app/shopify.server.ts`, `prisma/`); what checkout or customer data the pixel sends (`extensions/web-pixel/src/index.ts`); merchant API keys and data-request webhooks.
+
+            ### simpleanalytics/simpleanalytics
+            New monorepo for the next app version, not in production yet.
+            Needs review: ClickHouse schema, views, and retention; backfills that copy production visitor data; cluster, replication, and backup configuration.
+
+            ### simpleanalytics/simplecapture.com
+            Encrypted screen-recording product.
+            Needs review: encryption and key handling (`apps/web/src/lib/client-crypto.ts`); uploader-token and share-ID checks in `apps/web/src/app/api/`; retention and deletion jobs (`apps/worker/src/index.ts`).
+
+            ### simpleanalytics/strapi
+            CMS for marketing content.
+            Routine: content types, admin tweaks, and same-major updates.
+            Needs review: `.env.production`; public API permissions and auth (`src/extensions/users-permissions/`, `config/admin.js`, `config/middlewares.js`); removing or renaming content fields, which drops data; major upgrades.
+
+            ### simpleanalytics/support-reminder
+            Worker that posts support ticket counts to chat.
+            Needs review: posting customer identifiers or conversation content, or writing to the support system.
+
+            ### simpleanalytics/webflow-app
+            Webflow app that adds the script to customer sites.
+            Needs review: OAuth, sessions, and token storage (`data-client/app/api/auth/`, `data-client/app/lib/utils/database.ts`, `jwt.ts`); site checks in `data-client/app/api/scripts/` and `api/sites`; CORS in `data-client/proxy.ts`; script escaping in `scriptGenerator.ts`.
+
+            ### simpleanalytics/wordpress-plugin
+            WordPress plugin on customer sites, published weekly.
+            Needs review: capability checks, sanitization, and escaping (especially `src/Support/OnloadCallback.php`); collecting more visitor data by default or changing IP handling (`src/TrackingRules.php`); the publishing path (`.github/workflows/release.yml`, `release.sh`).
+
+            ## Additional instructions
+
             ${{ inputs.claude_extra_prompt }}
           claude_args: |
             --model ${{ inputs.claude_model }}
             --allowedTools "Bash(git diff:*),Bash(git log:*),Bash(git show:*),Glob,Grep,Read"
-            --json-schema '{"type":"object","properties":{"sdlc_label":{"type":"string","enum":["change: routine","change: needs review"]},"sdlc_reason":{"type":"string"},"issue_title":{"type":"string"},"issue_problem":{"type":"string"},"issue_suggested_changes":{"type":"array","items":{"type":"string"}}},"required":["sdlc_label","sdlc_reason","issue_title","issue_problem","issue_suggested_changes"],"additionalProperties":false}'
+            --json-schema '{"type":"object","properties":{"sdlc_label":{"type":"string","enum":["change: routine","change: needs review"]},"sdlc_reason":{"type":"string"}},"required":["sdlc_label","sdlc_reason"],"additionalProperties":false}'
 
       - name: Finalize SDLC label
-        id: sdlc_label
         uses: actions/github-script@v9
         env:
           EXISTING_SDLC_LABEL: ${{ steps.existing_sdlc_label.outputs.label }}
@@ -453,645 +395,3 @@ jobs:
             }
 
             core.setOutput('label', finalLabel);
-            core.setOutput('requires_review', String(finalLabel === needsReview));
-
-      - name: Enforce review-required PR template
-        if: ${{ steps.sdlc_label.outputs.requires_review == 'true' }}
-        uses: actions/github-script@v9
-        env:
-          EXISTING_ISSUE_REF: ${{ steps.existing_issue.outputs.ref }}
-          CLAUDE_STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
-          DESCRIPTION_PROVENANCE: ${{ steps.description_provenance.outputs.kind }}
-          ORIGINAL_PR_BODY_BASE64: ${{ steps.description_provenance.outputs.body_base64 }}
-          DESCRIPTION_CAPTURED_AT: ${{ steps.description_provenance.outputs.captured_at }}
-        with:
-          script: |
-            const needsReview = 'change: needs review';
-            const eventPullRequest = context.payload.pull_request;
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const prNumber = eventPullRequest.number;
-            const nameWithOwner = `${owner}/${repo}`;
-            const changeSummaryStart = '<!-- simpleanalytics:changes-start -->';
-            const changeSummaryEnd = '<!-- simpleanalytics:changes-end -->';
-
-            const { data: pullRequest } = await github.rest.pulls.get({
-              owner,
-              repo,
-              pull_number: prNumber,
-            });
-
-            async function closingIssueRefsFromGraphql() {
-              try {
-                const result = await github.graphql(`
-                  query($owner: String!, $repo: String!, $number: Int!) {
-                    repository(owner: $owner, name: $repo) {
-                      pullRequest(number: $number) {
-                        closingIssuesReferences(first: 20) {
-                          nodes {
-                            number
-                            url
-                            repository {
-                              nameWithOwner
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                `, { owner, repo, number: prNumber });
-
-                return result.repository.pullRequest.closingIssuesReferences.nodes.map((issue) => ({
-                  ref: issue.repository.nameWithOwner === nameWithOwner ? `#${issue.number}` : `${issue.repository.nameWithOwner}#${issue.number}`,
-                  url: issue.url,
-                }));
-              } catch (error) {
-                core.warning(`Could not read closingIssuesReferences via GraphQL: ${error.message}`);
-                return [];
-              }
-            }
-
-            function closingIssueRefsFromBody(body) {
-              const refs = [];
-              const pattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+((?:[\w.-]+\/[\w.-]+)?#\d+)/gi;
-              let match;
-
-              while ((match = pattern.exec(body || '')) !== null) {
-                refs.push({ ref: match[1], url: '' });
-              }
-
-              return refs;
-            }
-
-            function uniqueRefs(refs) {
-              const seen = new Set();
-              return refs.filter((item) => {
-                if (!item.ref || seen.has(item.ref)) return false;
-                seen.add(item.ref);
-                return true;
-              });
-            }
-
-            function escapeRegExp(value) {
-              return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            }
-
-            function findSection(body, title) {
-              const headings = [...String(body || '').matchAll(/^##\s+(.+?)\s*$/gm)];
-              const index = headings.findIndex((heading) => heading[1].trim().toLowerCase() === title.toLowerCase());
-              if (index === -1) return null;
-
-              const heading = headings[index];
-              const headingStart = heading.index;
-              const headingEnd = headingStart + heading[0].length;
-              let contentStart = headingEnd;
-
-              if (body.slice(contentStart, contentStart + 2) === '\r\n') contentStart += 2;
-              else if (body[contentStart] === '\n') contentStart += 1;
-
-              return {
-                headingStart,
-                contentStart,
-                sectionEnd: headings[index + 1]?.index ?? body.length,
-              };
-            }
-
-            function extractSection(body, title) {
-              const section = findSection(body, title);
-              return section ? body.slice(section.contentStart, section.sectionEnd).trim() : '';
-            }
-
-            function setSection(body, title, content) {
-              const rendered = `## ${title}\n\n${String(content || '').trim()}`;
-              const section = findSection(body, title);
-
-              if (!section) {
-                return [String(body || '').trimEnd(), rendered].filter(Boolean).join('\n\n').concat('\n');
-              }
-
-              const before = body.slice(0, section.headingStart);
-              const after = body.slice(section.sectionEnd);
-              return `${before}${rendered}${after ? `\n\n${after}` : '\n'}`;
-            }
-
-            function ensureSummary(body, fallback) {
-              if (findSection(body, 'Summary')) return body;
-
-              const value = String(body || '');
-              const firstHeading = /^##\s+/m.exec(value);
-
-              if (firstHeading?.index > 0 && value.slice(0, firstHeading.index).trim()) {
-                return `## Summary\n\n${value.slice(0, firstHeading.index).trimEnd()}\n\n${value.slice(firstHeading.index)}`;
-              }
-
-              if (!firstHeading && value.trim()) return `## Summary\n\n${value.trim()}\n`;
-              return `## Summary\n\n${fallback}\n\n${value.trimStart()}`.trimEnd().concat('\n');
-            }
-
-            function normalizeChecklist(value, states, preserveExistingExtras) {
-              const required = [
-                { label: 'Linked to an issue', checked: states.linkedIssue },
-                { label: 'Tested', checked: states.tested },
-                { label: 'Asked for a review', checked: states.askedForReview },
-              ];
-              const requiredByLabel = new Map(required.map((item) => [item.label.toLowerCase(), item]));
-              const seen = new Set();
-              const lines = preserveExistingExtras ? String(value || '').split(/\r?\n/) : [];
-              const output = [];
-
-              for (const line of lines) {
-                const item = line.trim().match(/^-\s*\[[ xX]\]\s*(Linked to an issue|Tested|Asked for a review)\s*\.?$/i);
-                if (!item) {
-                  output.push(line);
-                  continue;
-                }
-
-                const key = item[1].toLowerCase();
-                if (seen.has(key)) continue;
-                const requiredItem = requiredByLabel.get(key);
-                output.push(`- [${requiredItem.checked ? 'x' : ' '}] ${requiredItem.label}`);
-                seen.add(key);
-              }
-
-              for (const item of required) {
-                const key = item.label.toLowerCase();
-                if (!seen.has(key)) output.push(`- [${item.checked ? 'x' : ' '}] ${item.label}`);
-              }
-
-              return output.join('\n').trim();
-            }
-
-            function protectedMediaTokens(value) {
-              const patterns = [
-                /<picture\b[\s\S]*?<\/picture>/gi,
-                /<img\b[^>]*>/gi,
-                /!\[[^\]\n]*\]\(\s*(?:<[^>\n]+>|[^)\n]+)\s*\)/g,
-                /!\[[^\]\n]*\]\[[^\]\n]*\]/g,
-                /^\s*\[[^\]\n]+\]:\s+(?:<[^>\n]+>|\S+).*$/gm,
-                /https:\/\/github\.com\/user-attachments\/assets\/[A-Za-z0-9-]+/g,
-              ];
-              const tokens = [];
-
-              for (const pattern of patterns) {
-                for (const match of String(value || '').matchAll(pattern)) tokens.push(match[0].trim());
-              }
-
-              return [...new Set(tokens.filter(Boolean))];
-            }
-
-            function mediaIdentity(token) {
-              const markdown = token.match(/!\[[^\]]*\]\(\s*<?([^>\s)]+)>?/);
-              if (markdown?.[1]) return markdown[1];
-              const html = token.match(/\bsrc=["']([^"']+)["']/i);
-              if (html?.[1]) return html[1];
-              const attachment = token.match(/https:\/\/github\.com\/user-attachments\/assets\/[A-Za-z0-9-]+/);
-              return attachment?.[0] || token;
-            }
-
-            function preserveProtectedMedia(originalBody, body) {
-              const existing = new Set(protectedMediaTokens(body).map(mediaIdentity));
-              const missing = [];
-
-              for (const token of protectedMediaTokens(originalBody)) {
-                const identity = mediaIdentity(token);
-                if (existing.has(identity)) continue;
-                existing.add(identity);
-                missing.push(token);
-              }
-
-              if (!missing.length) return body;
-
-              const screenshots = extractSection(body, 'Screenshots');
-              return setSection(body, 'Screenshots', [screenshots, ...missing].filter(Boolean).join('\n\n'));
-            }
-
-            async function latestDescriptionEditIsHumanSinceCapture() {
-              const capturedAt = Date.parse(process.env.DESCRIPTION_CAPTURED_AT || '');
-              if (!Number.isFinite(capturedAt)) return false;
-
-              try {
-                const result = await github.graphql(`
-                  query($owner: String!, $repo: String!, $number: Int!) {
-                    repository(owner: $owner, name: $repo) {
-                      pullRequest(number: $number) {
-                        userContentEdits(last: 100) {
-                          nodes {
-                            editedAt
-                            editor {
-                              __typename
-                              login
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                `, { owner, repo, number: prNumber });
-                const latestEdit = (result.repository.pullRequest.userContentEdits.nodes || [])
-                  .filter((edit) => Date.parse(edit.editedAt) > capturedAt)
-                  .sort((left, right) => new Date(right.editedAt) - new Date(left.editedAt))[0];
-                const login = String(latestEdit?.editor?.login || '').toLowerCase();
-                const automatedLogin = /(?:^|[-_])(ai|bot|chatgpt|claude|codex|openai)(?:$|[-_\[])/i.test(login);
-
-                return latestEdit?.editor?.__typename === 'User' && !automatedLogin;
-              } catch (error) {
-                core.warning(`Could not check for a newer human PR description edit: ${error.message}`);
-                return false;
-              }
-            }
-
-            function checked(existingChecklist, label) {
-              const expression = new RegExp(`-\\s*\\[[xX]\\]\\s*${escapeRegExp(label)}`, 'i');
-              return expression.test(existingChecklist || '');
-            }
-
-            function stripGeneratedChangeSummary(value) {
-              const expression = new RegExp(`${escapeRegExp(changeSummaryStart)}[\\s\\S]*?${escapeRegExp(changeSummaryEnd)}`, 'g');
-              return (value || '').replace(expression, '').trim();
-            }
-
-            function cleanSummaryText(value) {
-              return stripGeneratedChangeSummary(value)
-                .replace(/^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+((?:[\w.-]+\/[\w.-]+)?#\d+)\s*$/gim, '')
-                .replace(/^\s*No linked issue was created automatically\.\s*$/gim, '')
-                .replace(/\bDescribe the change\.\s*/gi, '')
-                .trim();
-            }
-
-            function compactWhitespace(value) {
-              return (value || '').replace(/\s+/g, ' ').trim();
-            }
-
-            function truncate(value, maxLength) {
-              const text = compactWhitespace(value);
-              if (text.length <= maxLength) return text;
-              return `${text.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`;
-            }
-
-            function firstBodyParagraph(message) {
-              return (message || '')
-                .split(/\r?\n\r?\n/)
-                .map((paragraph) => paragraph
-                  .split(/\r?\n/)
-                  .map((line) => line.trim())
-                  .filter((line) =>
-                    line &&
-                    !/^Signed-off-by:/i.test(line) &&
-                    !/^Co-authored-by:/i.test(line)
-                  )
-                  .join(' ')
-                )
-                .find(Boolean) || '';
-            }
-
-            function parseCommitMessage(message) {
-              const lines = (message || '').split(/\r?\n/);
-              const subject = compactWhitespace(lines.shift() || '');
-              const body = lines.join('\n').trim();
-              return {
-                subject,
-                reason: firstBodyParagraph(body),
-              };
-            }
-
-            function isBranchUpdateCommit(subject) {
-              return /^(merge (branch|remote-tracking branch|pull request)|update branch|sync (main|master)|chore:?\s*(merge|sync)\b)/i.test(subject || '');
-            }
-
-            async function buildCommitChangeSummary() {
-              try {
-                const commits = await github.paginate(github.rest.pulls.listCommits, {
-                  owner,
-                  repo,
-                  pull_number: prNumber,
-                  per_page: 100,
-                });
-
-                const parsedCommits = commits
-                  .map((commit) => parseCommitMessage(commit.commit?.message || ''))
-                  .filter((commit) => commit.subject);
-                const reviewCommits = parsedCommits.filter((commit) => !isBranchUpdateCommit(commit.subject));
-                const sourceCommits = reviewCommits.length ? reviewCommits : parsedCommits;
-                const selectedCommits = sourceCommits.slice(-6);
-                const omittedCount = sourceCommits.length - selectedCommits.length;
-
-                if (!selectedCommits.length) return '';
-
-                const bullets = selectedCommits.map((commit) => {
-                  const subject = truncate(commit.subject, 140);
-                  const reason = truncate(commit.reason, 180);
-                  return reason ? `- ${subject} - ${reason}` : `- ${subject}`;
-                });
-
-                if (omittedCount > 0) {
-                  bullets.push(`- ...and ${omittedCount} earlier commit(s).`);
-                }
-
-                return [
-                  changeSummaryStart,
-                  'Changes:',
-                  ...bullets,
-                  changeSummaryEnd,
-                ].join('\n');
-              } catch (error) {
-                core.warning(`Could not build commit-based PR summary: ${error.message}`);
-                return '';
-              }
-            }
-
-            async function buildFallbackSummary() {
-              const cleanedBody = cleanSummaryText(currentBody);
-              if (cleanedBody) return cleanedBody;
-
-              try {
-                const files = await github.paginate(github.rest.pulls.listFiles, {
-                  owner,
-                  repo,
-                  pull_number: prNumber,
-                  per_page: 100,
-                });
-                const paths = files.slice(0, 8).map((file) => `- \`${file.filename}\``);
-                const omitted = files.length > paths.length ? `\n- ...and ${files.length - paths.length} more file(s)` : '';
-
-                return [
-                  pullRequest.title,
-                  '',
-                  'Changed files:',
-                  ...paths,
-                  omitted,
-                ].filter(Boolean).join('\n');
-              } catch (error) {
-                core.warning(`Could not list PR files for fallback summary: ${error.message}`);
-                return pullRequest.title;
-              }
-            }
-
-            function fallbackSecurityImplications() {
-              let reason = '';
-              try {
-                reason = compactWhitespace(JSON.parse(process.env.CLAUDE_STRUCTURED_OUTPUT || '{}')?.sdlc_reason || '');
-              } catch (error) {
-                core.warning(`Could not read Claude's SDLC reason: ${error.message}`);
-              }
-
-              if (reason) return `Has security impact - described as: ${reason}`;
-              return 'Has security impact - described as: This PR is labeled `change: needs review`, but Claude did not provide specific security implications. Reviewers should confirm the actual impact on security, privacy, customer/user data, system stability, or critical functionality.';
-            }
-
-            function normalizeSecurityImplications(value) {
-              const raw = (value || '').trim();
-              if (!raw) return fallbackSecurityImplications();
-
-              const lines = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-              const checkedNoImpact = lines.some((line) => /^-\s*\[[xX]\]\s*No security impact\.?$/i.test(line));
-              const checkedImpact = lines
-                .map((line) => line.match(/^-\s*\[[xX]\]\s*Has security impact - described as:\s*(.+)$/i))
-                .find(Boolean);
-
-              if (checkedImpact?.[1]?.trim()) {
-                return `Has security impact - described as: ${checkedImpact[1].trim()}`;
-              }
-
-              if (checkedNoImpact && !checkedImpact) return 'No security impact';
-              if (/^No security impact\.?$/i.test(raw)) return 'No security impact';
-
-              const impact = raw.match(/^Has security impact - described as:\s*([\s\S]+)$/i);
-              if (impact?.[1]?.trim()) {
-                return `Has security impact - described as: ${compactWhitespace(impact[1])}`;
-              }
-
-              const withoutCheckboxes = raw.replace(/^-\s*\[[ xX]\]\s*/gm, '').trim();
-              const isPlaceholder = (
-                !withoutCheckboxes ||
-                /^Has security impact - described as:\s*$/i.test(withoutCheckboxes) ||
-                (/No security impact/i.test(withoutCheckboxes) && /Has security impact - described as:\s*$/i.test(withoutCheckboxes))
-              );
-              if (isPlaceholder) return fallbackSecurityImplications();
-
-              return `Has security impact - described as: ${compactWhitespace(raw)}`;
-            }
-
-            function normalizeTesting(value) {
-              const raw = (value || '').trim();
-              if (!raw || /^Describe how this was tested\.?$/i.test(raw)) {
-                return 'Not run by Claude.';
-              }
-
-              return raw;
-            }
-
-            function testingWasFilled(value) {
-              const raw = (value || '').trim();
-              return Boolean(raw && !/^Not run by Claude\.?$/i.test(raw) && !/^Describe how this was tested\.?$/i.test(raw));
-            }
-
-            function issueDraftFromClaude() {
-              try {
-                const parsed = JSON.parse(process.env.CLAUDE_STRUCTURED_OUTPUT || '{}');
-                const title = compactWhitespace(parsed.issue_title || '').replace(/^Track:\s*/i, '');
-                const problem = (parsed.issue_problem || '').trim();
-                const suggestedChanges = Array.isArray(parsed.issue_suggested_changes)
-                  ? parsed.issue_suggested_changes
-                    .map((item) => String(item || '').trim().replace(/^[-*]\s+/, ''))
-                    .filter(Boolean)
-                  : [];
-
-                if (title && problem && suggestedChanges.length) {
-                  return { title, problem, suggestedChanges };
-                }
-
-                core.warning('Claude did not return a complete issue draft. Using neutral fallback issue content.');
-              } catch (error) {
-                core.warning(`Could not parse Claude issue draft: ${error.message}. Using neutral fallback issue content.`);
-              }
-
-              return {
-                title: compactWhitespace(pullRequest.title).replace(/^Track:\s*/i, ''),
-                problem: 'The reported behavior remains unresolved and needs investigation.',
-                suggestedChanges: [
-                  'Confirm the affected behavior, impact, and underlying cause.',
-                  'Define and validate an appropriate solution.',
-                ],
-              };
-            }
-
-            function buildIssueContent(issueDraft) {
-              const title = truncate(issueDraft.title, 240);
-              const suggestedChanges = issueDraft.suggestedChanges.map((item) => `- ${item}`);
-              const body = [
-                '## Problem',
-                '',
-                issueDraft.problem,
-                '',
-                '## Suggested changes',
-                '',
-                ...suggestedChanges,
-              ].join('\n');
-
-              return { title, body };
-            }
-
-            async function createTrackingIssue(targetOwner, targetRepo, issueContent) {
-              const { data: issue } = await github.rest.issues.create({
-                owner: targetOwner,
-                repo: targetRepo,
-                title: issueContent.title,
-                body: issueContent.body,
-              });
-
-              return {
-                ref: `${targetOwner}/${targetRepo}` === nameWithOwner ? `#${issue.number}` : `${targetOwner}/${targetRepo}#${issue.number}`,
-                url: issue.html_url,
-              };
-            }
-
-            const currentBody = pullRequest.body || '';
-            const originalBody = Buffer.from(process.env.ORIGINAL_PR_BODY_BASE64 || '', 'base64').toString('utf8');
-            const humanDescription = process.env.DESCRIPTION_PROVENANCE === 'human';
-            const newerHumanDescription = (
-              humanDescription &&
-              currentBody !== originalBody &&
-              await latestDescriptionEditIsHumanSinceCapture()
-            );
-            const sourceBody = humanDescription && !newerHumanDescription ? originalBody : currentBody;
-            const existingIssueRef = (process.env.EXISTING_ISSUE_REF || '').trim();
-            const linkedIssues = uniqueRefs([
-              ...(existingIssueRef ? [{ ref: existingIssueRef, url: '' }] : []),
-              ...(await closingIssueRefsFromGraphql()),
-              ...closingIssueRefsFromBody(sourceBody),
-              ...closingIssueRefsFromBody(currentBody),
-            ]);
-
-            let issueRef = linkedIssues[0]?.ref || '';
-
-            if (!issueRef) {
-              const issueContent = buildIssueContent(issueDraftFromClaude());
-              const targets = [
-                { owner: 'simpleanalytics', repo: 'dashboard' },
-                { owner, repo },
-              ].filter((target, index, targets) =>
-                targets.findIndex((item) => item.owner === target.owner && item.repo === target.repo) === index
-              );
-
-              const failures = [];
-              for (const target of targets) {
-                try {
-                  const createdIssue = await createTrackingIssue(target.owner, target.repo, issueContent);
-                  issueRef = createdIssue.ref;
-                  core.info(`Created review tracking issue ${createdIssue.ref}: ${createdIssue.url}`);
-                  break;
-                } catch (error) {
-                  failures.push(`${target.owner}/${target.repo}: ${error.message}`);
-                  core.warning(`Could not create review tracking issue in ${target.owner}/${target.repo}: ${error.message}`);
-                }
-              }
-
-              if (!issueRef) {
-                const suggestedIssue = `# ${issueContent.title}\n\n${issueContent.body}`;
-                const comment = [
-                  'Could not create a linked tracking issue automatically. Continuing without a linked issue.',
-                  '',
-                  `<details><summary>Suggested issue content</summary>`,
-                  '',
-                  '```markdown',
-                  suggestedIssue.replace(/```/g, "'''"),
-                  '```',
-                  '',
-                  '</details>',
-                  '',
-                  `Issue creation failures: ${failures.join('; ')}`,
-                ].join('\n');
-
-                try {
-                  await github.rest.issues.createComment({
-                    owner,
-                    repo,
-                    issue_number: prNumber,
-                    body: comment,
-                  });
-                } catch (error) {
-                  core.warning(`Could not add suggested issue content as a PR comment: ${error.message}`);
-                }
-
-                core.warning(`Could not create a linked review tracking issue. Continuing without issue reference. Failures: ${failures.join('; ')}`);
-              }
-            }
-
-            let nextBody;
-
-            if (humanDescription) {
-              nextBody = ensureSummary(sourceBody, pullRequest.title);
-
-              if (issueRef && !closingIssueRefsFromBody(nextBody).length) {
-                const summary = extractSection(nextBody, 'Summary');
-                nextBody = setSection(nextBody, 'Summary', [`Closes ${issueRef}`, summary].filter(Boolean).join('\n\n'));
-              }
-
-              const security = normalizeSecurityImplications(extractSection(nextBody, 'Security implications'));
-              const testing = normalizeTesting(extractSection(nextBody, 'Testing'));
-              const existingChecklist = extractSection(nextBody, 'Checklist');
-              const checklist = normalizeChecklist(existingChecklist, {
-                linkedIssue: Boolean(issueRef),
-                tested: checked(existingChecklist, 'Tested') || testingWasFilled(testing),
-                askedForReview: checked(existingChecklist, 'Asked for a review'),
-              }, true);
-
-              nextBody = setSection(nextBody, 'Security implications', security);
-              nextBody = setSection(nextBody, 'Testing', testing);
-              nextBody = setSection(nextBody, 'Checklist', checklist);
-            } else {
-              const existingSummary = extractSection(sourceBody, 'Summary');
-              const existingSecurity = extractSection(sourceBody, 'Security implications');
-              const existingTesting = extractSection(sourceBody, 'Testing');
-              const existingChecklist = extractSection(sourceBody, 'Checklist');
-              const manualSummary = cleanSummaryText(existingSummary);
-              const fallbackSummary = manualSummary ? '' : await buildFallbackSummary();
-              const commitChangeSummary = await buildCommitChangeSummary();
-              const summary = [
-                manualSummary || fallbackSummary,
-                commitChangeSummary,
-              ].filter(Boolean).join('\n\n').trim();
-              const security = normalizeSecurityImplications(existingSecurity);
-              const testing = normalizeTesting(existingTesting);
-              const closingLine = issueRef ? `Closes ${issueRef}` : 'No linked issue was created automatically.';
-              const checklist = normalizeChecklist('', {
-                linkedIssue: Boolean(issueRef),
-                tested: checked(existingChecklist, 'Tested') || testingWasFilled(testing),
-                askedForReview: checked(existingChecklist, 'Asked for a review'),
-              }, false);
-
-              nextBody = [
-                '## Summary',
-                '',
-                closingLine,
-                '',
-                summary,
-                '',
-                '## Security implications',
-                '',
-                security,
-                '',
-                '## Testing',
-                '',
-                testing,
-                '',
-                '## Checklist',
-                '',
-                checklist,
-                '',
-              ].join('\n');
-            }
-
-            nextBody = preserveProtectedMedia(originalBody, nextBody);
-
-            if (nextBody.trim() !== currentBody.trim()) {
-              await github.rest.pulls.update({
-                owner,
-                repo,
-                pull_number: prNumber,
-                body: nextBody,
-              });
-              core.info(`Updated ${humanDescription ? 'human-authored' : 'automated'} PR body with required template sections and issue reference ${issueRef}.`);
-            } else {
-              core.info('PR body already matches the Simple Analytics PR template.');
-            }
