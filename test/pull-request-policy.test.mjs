@@ -8,10 +8,10 @@ const workflow = await readFile(
 );
 
 const labelRules = workflow.match(
-  /            SDLC label rules:\n([\s\S]*?)\n            PR description rules:/,
+  /            SDLC label rules:\n([\s\S]*?)\n            Issue description rules:/,
 )?.[1];
 
-test('the signed Simple Analytics bot can trigger reviews by default', () => {
+test('the signed Simple Analytics bot can trigger classification by default', () => {
   const allowedBots = workflow.match(
     /      claude_allowed_bots:[\s\S]*?        default: "([^"]+)"/,
   )?.[1];
@@ -42,13 +42,28 @@ test('needs-review classification requires concrete material impact', () => {
   assert.match(labelRules, /Merely touching production code[^\n]+is not enough to require review/);
 });
 
-test('Claude returns the SDLC assessment without posting or changing labels', () => {
-  assert.match(labelRules, /EXISTING SDLC LABEL is non-empty, treat it as authoritative/);
+test('the labels follow the release risk levels of the SOC 2 procedures', () => {
+  assert.ok(labelRules, 'SDLC label rules should be present');
+  assert.match(labelRules, /`change: routine` covers Routine Changes [^\n]+ and Review Required Changes [^\n]+ may be AI-assisted/);
+  assert.match(labelRules, /`change: needs review` covers Significant Changes [^\n]+ and Emergency Changes [^\n]+ need a human review/);
+  assert.match(labelRules, /use of production data outside production/);
+  assert.match(labelRules, /including fixes for security vulnerabilities/);
+  assert.match(labelRules, /an emergency fix that restores service during a production incident/);
+  assert.match(labelRules, /internal tools, developer tooling, and dependency maintenance/);
+});
+
+test('Claude only classifies unlabeled pull requests without reviewing or changing them', () => {
+  assert.match(
+    workflow,
+    /      - name: Classify SDLC risk with Claude\n        id: claude\n        if: \$\{\{ steps\.existing_sdlc_label\.outputs\.label == '' \}\}\n/,
+  );
+  assert.match(workflow, /--allowedTools "Bash\(git diff:\*\),Bash\(git log:\*\),Bash\(git show:\*\),Glob,Grep,Read"/);
+  assert.doesNotMatch(workflow, /mcp__github|include_fix_links|SA_PAT_ADRIAAN_READ_REPOS/);
   assert.match(labelRules, /Never apply labels or post an SDLC label message yourself/);
   assert.doesNotMatch(labelRules, /using `gh issue edit`|Report the selected label|Remove the label/);
   assert.doesNotMatch(workflow, /only apply and briefly explain the SDLC label|one-sentence SDLC label reason/);
   const schema = JSON.parse(workflow.match(/--json-schema '([^']+)'/)[1]);
-  assert.deepEqual(schema.properties.sdlc_label.enum, ['', 'change: routine', 'change: needs review']);
+  assert.deepEqual(schema.properties.sdlc_label.enum, ['change: routine', 'change: needs review']);
   assert.ok(schema.required.includes('sdlc_label'));
   assert.ok(schema.required.includes('sdlc_reason'));
 });
