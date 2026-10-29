@@ -1,0 +1,10 @@
+name: Pull Request Checks
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, labeled]
+
+jobs:
+  pull-request:
+    uses: ./.github/workflows/pull-request.yml
+    secrets: inherit
