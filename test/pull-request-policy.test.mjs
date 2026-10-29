@@ -7,6 +7,16 @@ const workflow = await readFile(
   "utf8",
 );
 
+test("the prompt fits GitHub Actions expression limits before expanding repository notes", () => {
+  const prompt = workflow
+    .split("          prompt: |\n")[1]
+    .split("          claude_args: |")[0];
+  // GitHub turns mixed text/expressions into format('...', ...), escaping quotes.
+  // Include indentation and expression arguments in the count for a conservative bound.
+  assert.ok(prompt.replaceAll("'", "''").length + 100 < 21000);
+  assert.ok(prompt.includes("${{ env.SDLC_REPOSITORY_NOTES }}"));
+});
+
 test("the signed Simple Analytics bot can trigger classification by default", () => {
   const allowedBots = workflow.match(
     /      claude_allowed_bots:[\s\S]*?        default: "([^"]+)"/,
