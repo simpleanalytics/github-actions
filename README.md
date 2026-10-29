@@ -2,9 +2,9 @@
 
 This repo contains GitHub Action workflows that can be re-used by other apps.
 
-## Pull request reviews
+## Pull request risk labels
 
-Use the shared pull-request workflow to run Claude PR review, SDLC risk labeling, and review-required PR template enforcement.
+Use the shared pull-request workflow to apply an SDLC risk label to every pull request.
 
 ```yaml
 name: Pull Request
@@ -21,49 +21,13 @@ jobs:
       internal_app: false
 ```
 
-Claude reviews full PR diffs on `opened` and `reopened`, and only the newly pushed commit range on `synchronize` unless a critical issue is still present. It also avoids repeating identical patches already reviewed in up to 50 recently updated open PRs or 20 PRs merged during the previous 14 days. Cross-PR lookup is capped at 30 seconds and falls back to the normal review scope if GitHub is unavailable. Matches and failures appear as GitHub Actions annotations with details in the run summary. The workflow creates and applies exactly one SDLC label:
+When a PR has neither SDLC label, Claude reads the full PR diff and returns `change: routine` or `change: needs review` with a one-sentence reason, which the workflow applies and posts once. A `change: needs review` reason links to the lines of the most critical change. Later pushes skip Claude because an existing label is authoritative. If Claude returns no valid label, the workflow uses `change: routine`; if both labels are present, `change: needs review` wins.
 
-Review findings prefer concise inline comments. Small fixes use complete GitHub suggested changes; fixes needing more than three small replacements use a `Fix this` link that asks Claude Code to create a separate branch from the current PR head and return its link without opening another pull request. When needed, one top-level comment contains only findings that cannot be anchored to changed lines and the selected SDLC label; documentation updates use their separate copy-paste-ready template. Clean reviews post only the one-sentence SDLC label reason.
+The prompt maps the four release risk levels of the Software Release and Deployment Procedure onto the two labels and includes notes per repository. Add a note to the prompt when a repository needs specific guidance.
 
-- `change: routine` is the default for ordinary product work, bug fixes, UI and display changes, copy, design, refactors, tests, documentation, tooling, and dependency maintenance.
-- `change: needs review` is reserved for a concrete material change to sensitive-data handling or access, authentication or authorization, privacy or security boundaries, billing, database migrations or destructive data operations, production infrastructure or deployment safety, credible outage or data-loss risks, or similarly critical functionality.
+Set `internal_app: true` for internal apps where changes that do not touch personal data or security should stay `change: routine`. The workflow defaults to `claude-sonnet-5-5`; override it with `claude_model`.
 
-Uncertainty does not escalate a pull request by itself: when Claude cannot name a concrete material impact, or when it fails to apply either label, the workflow uses `change: routine`. If both labels are present, the explicit `change: needs review` classification wins.
-
-For `change: needs review`, the workflow ensures the required `Summary`, `Security implications`, `Testing`, and `Checklist` sections exist. Human-authored descriptions remain authoritative: their wording, extra sections, and images are preserved while missing required sections are added. Bot- or AI-authored descriptions may be normalized from their existing content. Images and attachments are preserved in either case, and automation never creates checklist items beyond `Linked to an issue`, `Tested`, and `Asked for a review`.
-
-Claude separately drafts a problem-focused tracking issue with `Problem` and `Suggested changes` sections, so completed PR details are not copied into the issue. The PR links to the issue with a `Closes` reference; the issue does not link back to the PR. Later review runs reuse that issue instead of creating duplicates.
-
-The workflow first tries to create the issue in `simpleanalytics/dashboard`; if that is not accessible, it falls back to the current repository. If issue creation still fails, the workflow continues and posts the suggested issue content in a collapsed PR comment.
-
-Set `internal_app: true` for internal apps where low-risk changes that do not touch customer/user data, security, privacy, or critical functionality should stay `change: routine` and skip approval-oriented enforcement.
-
-The workflow defaults to `claude-opus-5`. It can clone read-only cross-repo context when the caller has a `SA_PAT_ADRIAAN_READ_REPOS` secret. If the secret is missing, the workflow continues with a warning; the token is stored in 1Password under that name. Context repositories clone in parallel with `context_clone_concurrency`, which defaults to `8`.
-
-## Manual Claude requests
-
-Use the shared Claude workflow to keep `@claude` requests consistent across repositories.
-
-```yaml
-name: Claude Code
-
-on:
-  issue_comment:
-    types: [created]
-  pull_request_review_comment:
-    types: [created]
-  issues:
-    types: [opened, assigned]
-  pull_request_review:
-    types: [submitted]
-
-jobs:
-  claude:
-    uses: simpleanalytics/github-actions/.github/workflows/claude.yml@main
-    secrets: inherit
-```
-
-The workflow defaults to `claude-opus-4-8` and exposes `test_ref` so caller repositories can run their own local CI workflow after Claude handles a PR comment or review thread.
+## Deploy
 
 Make sure to set a secret in your repo called `DEPLOY_TOKEN`. The value can be found in infra repo secrets.
 
