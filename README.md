@@ -4,7 +4,7 @@ This repo contains GitHub Action workflows that can be re-used by other apps.
 
 ## Pull request risk labels
 
-Use the shared pull-request workflow to apply an SDLC risk label to every pull request. The calling repository needs access to an `ANTHROPIC_API_KEY` secret.
+Use the shared pull-request workflow to apply an SDLC risk label to every pull request. The calling repository needs access to an `ANTHROPIC_API_KEY` secret. Pass only that secret instead of `secrets: inherit`, so the shared workflow cannot receive unrelated credentials.
 
 ```yaml
 name: Pull Request
@@ -16,7 +16,8 @@ on:
 jobs:
   pull-request:
     uses: simpleanalytics/github-actions/.github/workflows/pull-request.yml@main
-    secrets: inherit
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
 On the first run, Claude reads the full PR diff and returns `change: routine` or `change: needs review` with a one-sentence reason. On later pushes, Claude only reads the changes since the last successful assessment, and earlier review triggers stay until a new diff removes them. The workflow posts the reason when the label changes; a `change: needs review` reason links to the lines of the most critical change. A label set by hand is kept as the assessment of the earlier code. If Claude returns an incomplete assessment, the run fails and leaves the labels unchanged.
