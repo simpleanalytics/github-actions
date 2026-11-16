@@ -49,3 +49,5 @@ Example usage:
       image_repo: ghcr.io/${{ github.repository }}
       image_tag: ${{ github.sha }}
 ```
+
+The deploys of a repository run one at a time. To let two apps deploy at the same time, give each its own `concurrency_group`, for example `concurrency_group: ${{ matrix.config.app }}` in a matrix of apps. Only do this for apps whose deploys can overlap on a host: two `blue_green` apps on the same host can't, the deploy hook writes their Traefik weights through the same temporary file.
