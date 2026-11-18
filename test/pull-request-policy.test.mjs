@@ -107,6 +107,7 @@ function githubScriptFor(stepName) {
 }
 
 const prepareClassification = githubScriptFor("Prepare SDLC classification");
+const createMissingLabels = githubScriptFor("Create missing SDLC labels");
 const finalizeLabel = githubScriptFor("Finalize SDLC label");
 const requestReview = githubScriptFor("Request human review");
 const routine = "change: routine";
@@ -687,6 +688,46 @@ test("a failed reviewer request remains visible as a workflow failure", async ()
   });
   await assert.rejects(state.run(requestReview), /Missing permission/);
   assert.deepEqual(state.mutations, []);
+});
+
+test("missing SDLC labels are created and existing labels stay as they are", async () => {
+  const created = [];
+  const github = {
+    rest: {
+      issues: {
+        async getLabel({ name }) {
+          if (name === needsReview) return { data: { name } };
+          throw Object.assign(new Error("Not Found"), { status: 404 });
+        },
+        async createLabel(label) {
+          created.push(label);
+        },
+      },
+    },
+  };
+  const context = { repo: { owner: "simpleanalytics", repo: "dashboard" } };
+  await createMissingLabels(github, context);
+  assert.deepEqual(created, [
+    {
+      owner: "simpleanalytics",
+      repo: "dashboard",
+      name: routine,
+      color: "fbca04",
+      description:
+        "Routine or ordinary change that needs at most one human or AI-assisted review",
+    },
+  ]);
+
+  github.rest.issues.getLabel = async () => {
+    throw Object.assign(new Error("Resource not accessible by integration"), {
+      status: 403,
+    });
+  };
+  await assert.rejects(
+    createMissingLabels(github, context),
+    /Resource not accessible/,
+  );
+  assert.equal(created.length, 1);
 });
 
 test("manual needs-review labels and ready drafts trigger the shared job, but forks do not", () => {

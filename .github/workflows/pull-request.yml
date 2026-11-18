@@ -41,6 +41,32 @@ jobs:
       pull-requests: write
       issues: write
     steps:
+      - name: Create missing SDLC labels
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const labels = [
+              {
+                name: 'change: needs review',
+                color: 'b60205',
+                description: 'Significant or emergency change affecting security, data protection, or stability',
+              },
+              {
+                name: 'change: routine',
+                color: 'fbca04',
+                description: 'Routine or ordinary change that needs at most one human or AI-assisted review',
+              },
+            ];
+
+            for (const label of labels) {
+              try {
+                await github.rest.issues.getLabel({ ...context.repo, name: label.name });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                await github.rest.issues.createLabel({ ...context.repo, ...label });
+              }
+            }
+
       - name: Prepare SDLC classification
         id: classification
         uses: actions/github-script@v9
