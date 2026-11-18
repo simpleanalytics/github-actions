@@ -107,6 +107,7 @@ function githubScriptFor(stepName) {
 }
 
 const prepareClassification = githubScriptFor("Prepare SDLC classification");
+const createMissingLabels = githubScriptFor("Create missing SDLC labels");
 const finalizeLabel = githubScriptFor("Finalize SDLC label");
 const requestReview = githubScriptFor("Request human review");
 const routine = "change: routine";
@@ -689,7 +690,47 @@ test("a failed reviewer request remains visible as a workflow failure", async ()
   assert.deepEqual(state.mutations, []);
 });
 
-test("manual needs-review labels and ready drafts trigger the shared job", () => {
+test("missing SDLC labels are created and existing labels stay as they are", async () => {
+  const created = [];
+  const github = {
+    rest: {
+      issues: {
+        async getLabel({ name }) {
+          if (name === needsReview) return { data: { name } };
+          throw Object.assign(new Error("Not Found"), { status: 404 });
+        },
+        async createLabel(label) {
+          created.push(label);
+        },
+      },
+    },
+  };
+  const context = { repo: { owner: "simpleanalytics", repo: "dashboard" } };
+  await createMissingLabels(github, context);
+  assert.deepEqual(created, [
+    {
+      owner: "simpleanalytics",
+      repo: "dashboard",
+      name: routine,
+      color: "fbca04",
+      description:
+        "Routine or ordinary change that needs at most one human or AI-assisted review",
+    },
+  ]);
+
+  github.rest.issues.getLabel = async () => {
+    throw Object.assign(new Error("Resource not accessible by integration"), {
+      status: 403,
+    });
+  };
+  await assert.rejects(
+    createMissingLabels(github, context),
+    /Resource not accessible/,
+  );
+  assert.equal(created.length, 1);
+});
+
+test("manual needs-review labels and ready drafts trigger the shared job, but forks do not", () => {
   const expression = workflow.match(
     /^    if: >-\n      \$\{\{ (.+) \}\}$/m,
   )?.[1];
@@ -700,7 +741,8 @@ test("manual needs-review labels and ready drafts trigger the shared job", () =>
     "fromJson",
     `return (${expression});`,
   );
-  for (const [action, label, draft, expected] of [
+  const repository = "simpleanalytics/example";
+  for (const [action, label, draft, expected, headRepository = repository] of [
     ["opened", undefined, false, true],
     ["reopened", undefined, false, true],
     ["synchronize", undefined, false, true],
@@ -710,15 +752,22 @@ test("manual needs-review labels and ready drafts trigger the shared job", () =>
     ["labeled", "bug", false, false],
     ["labeled", needsReview, true, false],
     ["closed", undefined, false, false],
+    ["opened", undefined, false, false, "contributor/example"],
+    ["labeled", needsReview, false, false, "contributor/example"],
   ]) {
     const github = {
       event_name: "pull_request",
-      event: { action, label: { name: label }, pull_request: { draft } },
+      repository,
+      event: {
+        action,
+        label: { name: label },
+        pull_request: { draft, head: { repo: { full_name: headRepository } } },
+      },
     };
     assert.equal(
       shouldRun(github, (values, value) => values.includes(value), JSON.parse),
       expected,
-      `${action}: ${label}, draft=${draft}`,
+      `${action}: ${label}, draft=${draft}, head=${headRepository}`,
     );
   }
 });

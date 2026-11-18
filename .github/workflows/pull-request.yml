@@ -31,7 +31,7 @@ jobs:
   sdlc-label:
     runs-on: ubuntu-latest
     if: >-
-      ${{ !github.event.pull_request.draft && github.event_name == 'pull_request' && (contains(fromJson('["opened", "reopened", "synchronize", "ready_for_review"]'), github.event.action) || (github.event.action == 'labeled' && github.event.label.name == 'change: needs review')) }}
+      ${{ !github.event.pull_request.draft && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (contains(fromJson('["opened", "reopened", "synchronize", "ready_for_review"]'), github.event.action) || (github.event.action == 'labeled' && github.event.label.name == 'change: needs review')) }}
     concurrency:
       group: sdlc-label-${{ github.repository }}-${{ github.event.pull_request.number }}
       cancel-in-progress: false
@@ -41,7 +41,7 @@ jobs:
       pull-requests: write
       issues: write
     steps:
-      - name: Ensure SDLC labels
+      - name: Create missing SDLC labels
         uses: actions/github-script@v9
         with:
           script: |
@@ -60,30 +60,10 @@ jobs:
 
             for (const label of labels) {
               try {
-                await github.rest.issues.getLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name: label.name,
-                });
-
-                await github.rest.issues.updateLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name: label.name,
-                  new_name: label.name,
-                  color: label.color,
-                  description: label.description,
-                });
+                await github.rest.issues.getLabel({ ...context.repo, name: label.name });
               } catch (error) {
                 if (error.status !== 404) throw error;
-
-                await github.rest.issues.createLabel({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name: label.name,
-                  color: label.color,
-                  description: label.description,
-                });
+                await github.rest.issues.createLabel({ ...context.repo, ...label });
               }
             }
 
