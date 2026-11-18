@@ -24,6 +24,8 @@ On the first run, Claude reads the full PR diff and returns `change: routine` or
 
 Draft PRs are skipped until they are ready for review. When a PR gets `change: needs review`, from Claude or by hand, the workflow requests a human reviewer.
 
+PRs from forks are skipped, because GitHub gives their workflows a read-only token and no secrets. Label them by hand and request a reviewer yourself when one needs review.
+
 The prompt maps the four release risk levels of the Software Release and Deployment Procedure onto the two labels and includes notes per repository. Add a note to the prompt when a repository needs specific guidance.
 
 Set `internal_app: true` for an internal app without a repository note, so changes that do not touch personal data or security stay `change: routine`. The workflow defaults to `claude-haiku-5-5`; override it with `claude_model`.
